@@ -1,0 +1,14 @@
+# MCP product runtime. Python 3.11+ is required.
+mcp==1.27.2
+pydantic==2.12.5
+trio==0.31.0
+
+# Default FlashInfer adapter and CUDA execution runtime.
+flashinfer-bench==0.1.2
+torch==2.8.0
+
+# Optional task-dataset helper (scripts/download_data.py).
+huggingface-hub>=0.34,<2
+
+# SOL-ExecBench is not published on PyPI. Install it separately and ensure
+# `import sol_execbench` succeeds before selecting benchmark = "sol".

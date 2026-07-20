@@ -1,0 +1,30 @@
+[tools]
+# Omit `enabled` to expose every registered tool. Keeping an explicit list makes
+# the product's agent surface reviewable and reproducible.
+enabled = [
+  "read_source",
+  "edit_source",
+  "write_source",
+  "benchmark_kernel",
+  "profile_kernel",
+  "log_experiment",
+  "read_journal",
+  "annotate_journal",
+  "checkout_experiment",
+  "diff_experiment",
+]
+
+[task]
+# Supported adapters: "flashinfer" and "sol".
+benchmark = "flashinfer"
+workspace_path = "workspace"
+
+# A backend-native Solution JSON. Paths are relative to the workspace, or may
+# be absolute. Use "reference" to optimize the task's reference implementation.
+baseline = "task/baseline/solution.json"
+
+# Optional comparison target:
+# [task.target]
+# path = "task/target/solution.json"
+# label = "Production kernel"
+# description = "Kernel used as the pinned performance target."

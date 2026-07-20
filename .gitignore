@@ -1,0 +1,19 @@
+.venv/
+**/__pycache__/
+*.py[cod]
+
+# Downloaded benchmark corpus.
+data/
+
+# Generated workspace state. Task metadata and baseline/target Solution JSONs
+# may be committed; large input tensors stay local.
+workspace/src/
+workspace/experiments/
+workspace/archive/
+workspace/.state/
+workspace/.claude/
+workspace/.mcp.json
+workspace/AGENTS.md
+workspace/CLAUDE.md
+workspace/optimization_journal.md
+workspace/task/blob/
