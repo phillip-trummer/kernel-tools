@@ -1,0 +1,27 @@
+{
+  "name": "flashinfer_wrapper_03f7b0",
+  "definition": "mla_paged_decode_h16_ckv512_kpe64_ps1",
+  "description": "Solution using FlashInfer BatchMLAPagedAttentionWrapper.",
+  "author": "flashinfer",
+  "spec": {
+    "language": "python",
+    "target_hardware": [
+      "NVIDIA GeForce RTX 4090",
+      "NVIDIA A100",
+      "NVIDIA H20",
+      "NVIDIA H100",
+      "NVIDIA H200",
+      "NVIDIA B200"
+    ],
+    "dependencies": [
+      "flashinfer"
+    ],
+    "entry_point": "main.py::run"
+  },
+  "sources": [
+    {
+      "path": "main.py",
+      "content": "import torch\nimport flashinfer\n\n\ndef run(q_nope, q_pe, ckv_cache, kpe_cache, kv_indptr, kv_indices, sm_scale):\n    batch_size, num_qo_heads, head_dim_ckv = q_nope.shape\n    _, _, head_dim_kpe = q_pe.shape\n    page_size = ckv_cache.shape[1]\n    len_indptr = kv_indptr.shape[0]\n    num_kv_indices = kv_indices.shape[0]\n    \n    # Check constants\n    assert num_qo_heads == 16\n    assert head_dim_ckv == 512\n    assert head_dim_kpe == 64\n    assert page_size == 1\n    \n    # Check constraints\n    assert len_indptr == batch_size + 1\n    assert num_kv_indices == kv_indptr[-1].item()\n    \n    device = q_nope.device\n    \n    qo_indptr = torch.arange(0, batch_size + 1, dtype=torch.int32, device=device)\n    kv_len_arr = (kv_indptr[1:] - kv_indptr[:-1]).to(torch.int32)\n    \n    workspace = torch.empty(128 * 1024 * 1024, dtype=torch.int8, device=device)\n    \n    mla_wrapper = flashinfer.mla.BatchMLAPagedAttentionWrapper(workspace)\n    \n    mla_wrapper.plan(\n        qo_indptr=qo_indptr,\n        kv_indptr=kv_indptr,\n        kv_indices=kv_indices,\n        kv_len_arr=kv_len_arr,\n        num_heads=num_qo_heads,\n        head_dim_ckv=head_dim_ckv,\n        head_dim_kpe=head_dim_kpe,\n        page_size=page_size,\n        causal=False,\n        sm_scale=sm_scale,\n        q_data_type=q_nope.dtype,\n        kv_data_type=ckv_cache.dtype,\n    )\n    \n    output, lse = mla_wrapper.run(\n        q_nope,\n        q_pe,\n        ckv_cache,\n        kpe_cache,\n        return_lse=True,\n    )\n    \n    return output, lse\n"
+    }
+  ]
+}

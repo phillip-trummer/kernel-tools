@@ -1,0 +1,30 @@
+{
+  "name": "candidate_2d110027b8cd7368",
+  "definition": "mla_paged_decode_h16_ckv512_kpe64_ps1",
+  "author": "agent",
+  "spec": {
+    "language": "cuda",
+    "target_hardware": [
+      "NVIDIA_H100_NVL"
+    ],
+    "entry_point": "main.cpp::run",
+    "dependencies": [],
+    "destination_passing_style": false,
+    "binding": "torch"
+  },
+  "sources": [
+    {
+      "path": "kernel.cu",
+      "content": "\n"
+    },
+    {
+      "path": "kernel.h",
+      "content": "#pragma once\n#include <torch/extension.h>\n\nvoid run_mla_decode(\n    torch::Tensor q_nope,\n    torch::Tensor q_pe,\n    torch::Tensor ckv_cache,\n    torch::Tensor kpe_cache,\n    torch::Tensor kv_indptr,\n    torch::Tensor kv_indices,\n    torch::Tensor output,\n    torch::Tensor lse,\n    float sm_scale\n);"
+    },
+    {
+      "path": "main.cpp",
+      "content": "#include <torch/extension.h>\n#include <pybind11/stl.h>\n#include <tuple>\n#include \"kernel.h\"\n\nstd::tuple<torch::Tensor, torch::Tensor> run_dict(\n    torch::Tensor q_nope,\n    torch::Tensor q_pe,\n    torch::Tensor ckv_cache,\n    torch::Tensor kpe_cache,\n    torch::Tensor kv_indptr,\n    torch::Tensor kv_indices,\n    float sm_scale\n) {\n    // Ensure contiguous inputs\n    q_nope = q_nope.contiguous();\n    q_pe = q_pe.contiguous();\n    ckv_cache = ckv_cache.contiguous();\n    kpe_cache = kpe_cache.contiguous();\n    kv_indptr = kv_indptr.contiguous();\n    kv_indices = kv_indices.contiguous();\n\n    int batch_size = q_nope.size(0);\n    int num_heads = q_nope.size(1);\n    int head_dim = q_nope.size(2);\n    \n    auto options = q_nope.options();\n    // No zero-init needed: the combine kernel writes every (b, h, d) element of output\n    // (empty batches write 0 explicitly), so torch::empty avoids a redundant fill launch.\n    auto output = torch::empty({batch_size, num_heads, head_dim}, options);\n    auto lse = torch::empty({batch_size, num_heads}, options.dtype(torch::kFloat32));\n    \n    auto kv_indptr_i32 = kv_indptr.to(torch::kInt);\n    auto kv_indices_i32 = kv_indices.to(torch::kInt);\n\n    run_mla_decode(q_nope, q_pe, ckv_cache, kpe_cache, kv_indptr_i32, kv_indices_i32, output, lse, sm_scale);\n    \n    return std::make_tuple(output, lse);\n}\n\nPYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {\n    m.def(\"run\", &run_dict, \"MLA Decode Kernel\",\n          py::arg(\"q_nope\"), py::arg(\"q_pe\"), \n          py::arg(\"ckv_cache\"), py::arg(\"kpe_cache\"), \n          py::arg(\"kv_indptr\"), py::arg(\"kv_indices\"), \n          py::arg(\"sm_scale\"));\n}\n"
+    }
+  ],
+  "description": null
+}

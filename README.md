@@ -1,166 +1,199 @@
 # Kernel Optimizer MCP
 
-A standalone MCP tool suite for correctness-preserving GPU kernel optimization.
-Claude Code or Codex drives the session; this package owns only the domain tools,
-benchmark adapters, experiment journal, and workspace lifecycle. It contains no
-custom agent loop and no model-provider client.
+An MCP server for correctness-preserving GPU kernel optimization. Claude Code
+or Codex edits kernels through a constrained tool surface, benchmarks candidates,
+and records measured experiments in a persistent journal.
 
-## What is included
+## Background
 
-```text
-config.toml             tool allowlist, adapter, workspace, baseline/target
-tools/                  MCP-exposed kernel, benchmark, profiling, and journal tools
-tools/adapters/         FlashInfer and SOL benchmark integrations
-scripts/mcp_server.py   stdio MCP server
-scripts/setup_workspace.py
-                        destructive run initialization and baseline measurement
-scripts/doctor.py       non-destructive installation/configuration preflight
-scripts/{download_data,seed_task}.py
-                        optional FlashInfer task acquisition
-scripts/{src_to_solution,solution_to_src,solution_to_sol}.py
-                        solution authoring/conversion utilities
-docs/adapter.md         adapter integration contract
-workspace/task/         user-supplied task fixtures
-```
+Kernel optimization is a non-convex search: promising structural rewrites often
+regress before they improve, while long-running agents tend to protect the
+current kernel and carry unverified conclusions forward in free-form memory.
 
-Research reports, plotting/log-analysis scripts, the bespoke `agent.py` loop,
-provider clients, and API credentials are deliberately excluded.
+This project provides a *git for experiments*. Each logged node contains an
+exact source snapshot and full benchmark result; agents can branch, compare, and
+restore nodes without losing progress. A structured optimization journal carries
+measured results, hypotheses, facts, and hazards across context resets while
+keeping qualitative claims distinct from evidence.
 
-## Requirements
+Included benchmark adapters:
 
-- Linux and Python 3.11+
-- A CUDA-capable GPU and matching PyTorch/CUDA toolchain
-- `ncu` on `PATH` when `profile_kernel` is enabled
-- Claude Code or Codex as the MCP client
-- For the default adapter: `flashinfer-bench`
-- For SOL: an environment where `import sol_execbench` succeeds; SOL timing also
-  requires a compatible CUDA driver
+- [flashinfer-bench](https://github.com/flashinfer-ai/flashinfer-bench) (default)
+- [SOL-ExecBench](https://github.com/NVIDIA/SOL-ExecBench)
 
-Create an isolated environment:
+## Quick start
+
+Requirements: Linux, Python 3.11+, a CUDA-capable NVIDIA GPU, a compatible
+PyTorch/CUDA toolchain, and either Claude Code or Codex.
 
 ```bash
-cd cuda_kernel_coder_mcp
 python -m venv .venv
 source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+
 python scripts/doctor.py
+python scripts/setup_workspace.py
 ```
 
-For PyTorch builds that require a particular CUDA wheel, install the appropriate
-wheel first and then install the remaining requirements.
+The repository ships with a complete example under `example-workspace/task/`:
+47 paged Multi-head Latent Attention (MLA) decode workloads, their tensor inputs,
+and an NVIDIA H100 NVL CUDA baseline scaffold. `config.toml` already points to it;
+the FlashInfer comparison target is enabled as a performance yardstick, while
+`profile_kernel` is disabled by default.
 
-## Prepare a task
+Setup benchmarks the baseline and records it as `v0_baseline`. It preserves
+`example-workspace/task/` and `archive/`, but resets the working source,
+experiment tree, cache, snapshots, and journal.
 
-The configured adapter owns the native fixture schema. Both included adapters use:
+### Claude Code
 
-```text
-workspace/task/
-├── definition.json
-├── workloads.jsonl       ordered cheapest to most expensive
-├── blob/                 optional safetensors inputs
-├── baseline/
-│   └── solution.json
-└── target/               optional
-    └── solution.json
+```bash
+cd example-workspace
+claude
 ```
 
-To use a task from the FlashInfer trace dataset:
+Setup writes the project MCP configuration, instructions, and permissions.
+
+### Codex
+
+Run the absolute `codex mcp add ...` command printed by setup, then:
+
+```bash
+codex -C /absolute/path/to/example-workspace
+```
+
+If the repository or virtual environment moves, replace the registration:
+
+```bash
+codex mcp remove kernel-tools
+# Run the registration command printed by setup again.
+```
+
+## Workflow
+
+- `src/` is the working kernel.
+- `benchmark_kernel(scope="smoke")` runs representative workloads.
+- `benchmark_kernel(scope="full")` runs the complete suite and is required
+  before `log_experiment` accepts the current source.
+- `log_experiment` records the exact source, evaluation, and tree position.
+- `checkout_experiment` restores a recorded source snapshot.
+- `optimization_journal.md` renders the task, build contract, experiment tree,
+  current best, hypotheses, facts, and hazards.
+- Correctness is mandatory. Performance is same-run speedup when a normalizer is
+  available, otherwise absolute latency.
+
+Default tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `read_source` | Read working or recorded source. |
+| `edit_source`, `write_source` | Modify an existing source file. |
+| `benchmark_kernel` | Build, validate, and time the kernel. |
+| `log_experiment` | Record a full-benchmark result. |
+| `read_journal`, `annotate_journal` | Read or update optimization knowledge. |
+| `checkout_experiment`, `diff_experiment` | Restore or compare experiments. |
+| `profile_kernel` | Profile with Nsight Compute; disabled by default. |
+
+Enable profiling by installing `ncu`, adding `"profile_kernel"` to
+`[tools].enabled`, and rerunning setup.
+
+## Configuration
+
+`config.toml` selects the tool surface, adapter, workspace, baseline, and
+optional comparison target:
+
+```toml
+[tools]
+enabled = ["read_source", "edit_source", "write_source", "benchmark_kernel",
+           "log_experiment", "read_journal", "annotate_journal",
+           "checkout_experiment", "diff_experiment"]
+
+[task]
+benchmark = "flashinfer"
+workspace_path = "example-workspace"
+baseline = "task/baseline/stub.json"
+
+[task.target]
+path = "task/target/flashinfer_wrapper_03f7b0.json"
+label = "FlashInfer MLA"
+description = "FlashInfer paged MLA decode wrapper."
+```
+
+Baseline and target paths are relative to the workspace unless absolute. A
+baseline may also be `"reference"`, which starts from the task's reference
+implementation.
+
+Setup replaces `src/`, `experiments/`, `.state/`, and
+`optimization_journal.md`. It does not modify `task/` unless
+`--sort-workloads` is passed, and it preserves `archive/`.
+
+## Use another FlashInfer task
+
+Download and inspect the public
+[`flashinfer-ai/flashinfer-trace`](https://huggingface.co/datasets/flashinfer-ai/flashinfer-trace)
+dataset:
 
 ```bash
 python scripts/download_data.py --metadata-only
 python scripts/seed_task.py --list
 python scripts/seed_task.py <definition> --list
+```
+
+Replace the bundled task:
+
+```bash
 python scripts/seed_task.py <definition> \
-  --baseline <solution> --target <solution>
+  --baseline <solution> \
+  --target <solution> \
+  --force
 ```
 
-Omit `--metadata-only` when the selected workloads need tensor blobs. The seeding
-command prints the exact baseline and target paths to put in `config.toml`.
+Omit `--target` if unused. Remove `--metadata-only` when the selected workloads
+require saved tensor blobs. To preserve the bundled example, set another
+`workspace_path` and pass it through `seed_task.py --workspace`.
 
-For a custom FlashInfer kernel, author ordinary source files and package them:
+Task layout:
+
+```text
+<workspace>/task/
+├── definition.json
+├── workloads.jsonl
+├── blob/                 # optional saved inputs
+├── baseline/<solution>.json
+└── target/<solution>.json
+```
+
+Package or extract a FlashInfer Solution:
 
 ```bash
-python scripts/src_to_solution.py path/to/sources \
-  workspace/task/baseline/solution.json \
-  --definition <definition-name> --language cuda --entry main.cpp::run
+python scripts/src_to_solution.py path/to/src path/to/solution.json \
+  --definition <definition> --language cuda --entry main.cpp::run
+
+python scripts/solution_to_src.py path/to/solution.json path/to/src
 ```
 
-## Initialize the workspace
+## SOL
 
-Edit `config.toml`, then run:
+Install SOL-ExecBench separately and ensure `import sol_execbench` succeeds.
+Set `benchmark = "sol"` and provide a SOL-native baseline Solution. Task fixtures
+are shared with FlashInfer, but their Solution build specifications differ.
+
+Export a recorded experiment as a SOL problem:
 
 ```bash
-python scripts/doctor.py
-python scripts/setup_workspace.py --sort-workloads
+python scripts/solution_to_sol.py --list
+python scripts/solution_to_sol.py <experiment> --out path/to/sol-problem
 ```
 
-Setup preserves `workspace/task/` but replaces prior generated source, state,
-archives, experiment snapshots, and the rendered journal. It then:
+SOL timing uses CUPTI and requires a compatible CUDA driver.
 
-1. freezes the baseline Solution's build specification;
-2. detects the actual accelerator;
-3. creates the task/journal state;
-4. benchmarks the optional target and required baseline;
-5. records the baseline as `v0_baseline`;
-6. writes client configuration and instructions.
+## Extend or verify
 
-Do not run setup over a workspace whose prior experiment state has not been saved.
-
-## Run with Claude Code
-
-Setup writes `workspace/.mcp.json`, pre-approves the kernel MCP tools, and blocks
-Claude's direct filesystem tools so journal/cache invariants cannot be bypassed.
-
-```bash
-cd workspace
-claude
-```
-
-Claude Code automatically reads `CLAUDE.md` generated by setup.
-
-## Run with Codex
-
-Setup prints an absolute, reproducible registration command. Run it once, then:
-
-```bash
-codex -C /absolute/path/to/cuda_kernel_coder_mcp/workspace
-```
-
-Codex automatically reads the generated `AGENTS.md`. Inspect or remove the global
-registration with `codex mcp get kernel-tools` and
-`codex mcp remove kernel-tools`. Re-run the printed registration command if the
-product directory, Python environment, or workspace moves.
-
-## Operating model
-
-- `src/` is the working kernel.
-- `benchmark_kernel(scope="smoke")` is the fast representative check.
-- A full benchmark is required before `log_experiment` will record exact source.
-- `log_experiment` is commit-like; `checkout_experiment` restores a recorded node.
-- `optimization_journal.md` is a rendered view of the structured experiment tree.
-- Correctness is mandatory. Performance is represented as same-run speedup when
-  available, otherwise absolute latency where lower is better.
-
-All tools resolve a workspace explicitly through the server command; they do not
-depend on the MCP client's inherited working directory.
-
-## Add another benchmark
-
-Implement `BenchmarkAdapter` in `tools/adapters/`, register its name in
-`tools/_benchmark.py`, and follow [docs/adapter.md](docs/adapter.md). The adapter
-returns neutral per-workload leaves; shared code owns aggregation, ranking, cache,
-and journal rendering.
-
-## Verification
-
-The test suite is GPU-independent:
+The adapter contract is documented in [docs/adapter.md](docs/adapter.md). Add an
+implementation under `tools/adapters/` and register it in `tools/_benchmark.py`.
 
 ```bash
 python -m unittest discover -s tests -v
 python -m compileall -q tools scripts
 ```
-
-The final acceptance test is adapter/GPU-dependent: initialize a real task, then
-verify smoke benchmark, full benchmark, profiling (if enabled), experiment logging,
-checkout, and journal rendering through the chosen MCP client.
-
