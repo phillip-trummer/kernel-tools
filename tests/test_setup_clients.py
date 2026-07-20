@@ -5,6 +5,7 @@ from pathlib import Path
 
 from scripts.setup_workspace import (
     CLIENT_INSTRUCTIONS,
+    _parse_args,
     _server_command,
     _write_client_instructions,
     _write_mcp_config,
@@ -12,6 +13,14 @@ from scripts.setup_workspace import (
 
 
 class ClientBootstrapTests(unittest.TestCase):
+    def test_baseline_benchmark_is_enabled_by_default(self):
+        self.assertFalse(_parse_args([]).skip_baseline_benchmark)
+
+    def test_baseline_benchmark_can_be_skipped(self):
+        self.assertTrue(
+            _parse_args(["--skip-baseline-benchmark"]).skip_baseline_benchmark
+        )
+
     def test_server_command_pins_workspace_and_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -44,4 +53,3 @@ class ClientBootstrapTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

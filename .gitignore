@@ -5,15 +5,14 @@
 # Downloaded benchmark corpus.
 data/
 
-# Generated workspace state. Task metadata and baseline/target Solution JSONs
-# may be committed; large input tensors stay local.
-workspace/src/
-workspace/experiments/
-workspace/archive/
-workspace/.state/
-workspace/.claude/
-workspace/.mcp.json
-workspace/AGENTS.md
-workspace/CLAUDE.md
-workspace/optimization_journal.md
-workspace/task/blob/
+# Generated example-workspace state. The bundled task/ is source data and
+# intentionally remains tracked.
+example-workspace/src/
+example-workspace/experiments/
+example-workspace/archive/
+example-workspace/.state/
+example-workspace/.claude/
+example-workspace/.mcp.json
+example-workspace/AGENTS.md
+example-workspace/CLAUDE.md
+example-workspace/optimization_journal.md

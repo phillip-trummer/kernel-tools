@@ -33,18 +33,22 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
 python scripts/doctor.py
-python scripts/setup_workspace.py
+python scripts/setup_workspace.py --skip-baseline-benchmark
 ```
 
 The repository ships with a complete example under `example-workspace/task/`:
 47 paged Multi-head Latent Attention (MLA) decode workloads, their tensor inputs,
-and an NVIDIA H100 NVL CUDA baseline scaffold. `config.toml` already points to it;
-the FlashInfer comparison target is enabled as a performance yardstick, while
+and an NVIDIA H100 NVL CUDA scaffold. `config.toml` already points to it; the
+FlashInfer comparison target is enabled as a performance yardstick, while
 `profile_kernel` is disabled by default.
 
-Setup benchmarks the baseline and records it as `v0_baseline`. It preserves
-`example-workspace/task/` and `archive/`, but resets the working source,
-experiment tree, cache, snapshots, and journal.
+The flag stages the intentionally empty scaffold without adding its compile
+errors to the journal. Setup still benchmarks and records the target; the
+agent's first logged kernel becomes `v0`. Omit the flag when the baseline is
+runnable and should be measured as `v0_baseline`.
+
+Setup preserves `example-workspace/task/` and `archive/`, but resets the working
+source, experiment tree, cache, snapshots, and journal.
 
 ### Claude Code
 
@@ -122,7 +126,8 @@ description = "FlashInfer paged MLA decode wrapper."
 
 Baseline and target paths are relative to the workspace unless absolute. A
 baseline may also be `"reference"`, which starts from the task's reference
-implementation.
+implementation. Use `--skip-baseline-benchmark` for an incomplete starting
+kernel; the comparison target is still measured.
 
 Setup replaces `src/`, `experiments/`, `.state/`, and
 `optimization_journal.md`. It does not modify `task/` unless

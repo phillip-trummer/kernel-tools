@@ -6,11 +6,11 @@ adapter's native format. This wipes prior-run state (src/, experiments/,
 adapter: the neutral task spec, representative shapes, and journal header become
 tree state, so the journal renders the task from the tree. Finally it stages the
 baseline's sources into src/, freezes the baseline's build spec as the run's
-build spec, runs benchmark_kernel, and logs the initial kernel as the
-`v0_baseline` experiment so the agent starts with a logged head.
+build spec, and optionally benchmarks and logs it as `v0_baseline`.
 """
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import os
@@ -154,9 +154,7 @@ def _check_tool_adapters(tool_names: list[str], adapter_name: str) -> None:
             )
 
 
-def main(argv=None) -> int:
-    import argparse
-
+def _parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--sort-workloads",
@@ -165,7 +163,17 @@ def main(argv=None) -> int:
         "the tree, so representative selection is monotonic. Reports whether it "
         "changed anything (a fixture that is already sorted is left untouched).",
     )
-    args = parser.parse_args(argv)
+    parser.add_argument(
+        "--skip-baseline-benchmark",
+        action="store_true",
+        help="Stage the baseline without benchmarking or logging it. Useful for "
+        "an incomplete scaffold; the first experiment logged by the agent is v0.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = _parse_args(argv)
 
     # Get the benchmark adapter from config (the kernel's language comes from the baseline).
     repo_root = Path(__file__).resolve().parent.parent
@@ -296,7 +304,7 @@ def main(argv=None) -> int:
                 files = adapter.baseline_files(baseline_path)
             except ValueError as e:
                 raise SystemExit(f"Error: could not load baseline: {e}")
-            print(f"[Setup] measuring initial kernel from {_disp(baseline_path, repo_root)}")
+            print(f"[Setup] staged initial kernel from {_disp(baseline_path, repo_root)}")
         _stage_files(src_dir, files)
 
         # Seed the tree from the adapter (the kernel language now comes from the
@@ -341,17 +349,25 @@ def main(argv=None) -> int:
             _tree.save_tree(tree)
             print(f"[Setup] recorded target '{target_label}'.")
 
-        # Measure the staged kernel and log it as the v0 baseline experiment.
-        test_result = benchmark_kernel(scope="full")
-        if test_result.startswith("Error"):
-            raise SystemExit(f"[Setup] benchmark_kernel failed: {test_result}...")
-        log_result = log_experiment(
-            slug="baseline",
-            description="Initial baseline kernel.",
-        )
-        if log_result.startswith("Error"):
-            raise SystemExit(f"[Setup] log_experiment failed: {log_result}")
-        print(f"[Setup] {log_result} \n")
+        # An incomplete scaffold is useful source material but not useful evidence.
+        # Leave the tree empty in that mode; the agent's first logged result is v0.
+        if args.skip_baseline_benchmark:
+            print(
+                "[Setup] skipped the baseline benchmark; no initial experiment "
+                "was logged."
+            )
+        else:
+            test_result = benchmark_kernel(scope="full")
+            if test_result.startswith("Error"):
+                raise SystemExit(f"[Setup] benchmark_kernel failed: {test_result}...")
+            log_result = log_experiment(
+                slug="baseline",
+                description="Initial baseline kernel.",
+            )
+            if log_result.startswith("Error"):
+                raise SystemExit(f"[Setup] log_experiment failed: {log_result}")
+            print(f"[Setup] {log_result}")
+        print()
         server_command = _server_command(repo_root, workspace)
         print("[Setup] Claude Code: cd into the workspace and run `claude`.")
         print("[Setup] Codex registration (once):")
