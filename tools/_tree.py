@@ -633,11 +633,14 @@ def _representative_workload_lines(
                 metrics.append(f"{target_ratio:.2f}× vs {target_label}")
             if metrics:
                 line += f"; {'; '.join(metrics)}"
-        tolerance = r.get("tolerance")
-        if tolerance:
-            rendered = _format_tolerance(tolerance)
-            if rendered:
-                line += f"; tolerance {rendered}"
+        else:
+            # The bar only matters next to a miss; on a pass the header's
+            # run-wide tolerance already says what was cleared.
+            tolerance = r.get("tolerance")
+            if tolerance:
+                rendered = _format_tolerance(tolerance)
+                if rendered:
+                    line += f"; tolerance {rendered}"
         lines.append(line)
     return lines
 
