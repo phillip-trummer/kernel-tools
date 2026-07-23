@@ -14,3 +14,19 @@ baseline = "task/baseline/stub.json"
 path = "task/target/flashinfer_wrapper_03f7b0.json"
 label = "FlashInfer MLA"
 description = "FlashInfer paged MLA decode wrapper."
+
+[[task.representative_workloads]]
+name = "small"
+uuid = "990b57e3-2975-41a1-be67-ecd1ba020887"
+
+[[task.representative_workloads]]
+name = "medium"
+uuid = "787d2d2f-548c-46ab-9ded-55fd30b1de20"
+
+[[task.representative_workloads]]
+name = "large"
+uuid = "fd4b2558-ee4f-4d9e-ab3f-7a8333db6340"
+
+[[task.representative_workloads]]
+name = "xlarge"
+uuid = "5bef8d88-0f74-4ccb-a256-b02842951df3"
