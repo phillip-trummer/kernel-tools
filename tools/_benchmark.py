@@ -110,15 +110,18 @@ class BenchmarkAdapter(Protocol):
 def get_adapter(state: dict | None = None) -> BenchmarkAdapter:
     """Construct the workspace's selected benchmark adapter from its run-level
     state (the marker setup wrote, or `state` when given): `adapter` selects the
-    implementation. Defaults to flashinfer."""
+    implementation and `representative_workloads` pins the named smoke/profile
+    workloads by UUID. Defaults to flashinfer and positional representatives for
+    non-setup workspaces."""
     state = state or read_benchmark_state() or {}
     name = state.get("adapter", "flashinfer")
+    representative_workloads = state.get("representative_workloads")
     if name == "flashinfer":
         from tools.adapters.flashinfer import FlashInferAdapter
 
-        return FlashInferAdapter()
+        return FlashInferAdapter(representative_workloads)
     if name == "sol":
         from tools.adapters.sol import SOLAdapter
 
-        return SOLAdapter()
+        return SOLAdapter(representative_workloads)
     raise ValueError(f"unknown benchmark adapter {name!r}")

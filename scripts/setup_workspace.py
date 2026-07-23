@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tools import _tree, registry
 from tools._benchmark import BenchmarkUnavailable, get_adapter
 from tools._evaluation import aggregate
+from tools._workloads import REPRESENTATIVE_WORKLOAD_LABELS
 from tools._workspace import write_benchmark_state
 from tools.registry import MCP_SERVER_NAME, select_schemas, validate_enabled
 from tools.log_experiment import log_experiment
@@ -42,6 +43,86 @@ def _resolve_path(workspace: Path, raw: str) -> Path:
     """Resolve a config path relative to the workspace root, or as-is if absolute."""
     p = Path(raw)
     return p if p.is_absolute() else workspace / p
+
+
+def _representative_workloads_from_config(
+    task_cfg: dict, workloads_path: Path
+) -> dict[str, str]:
+    """Load named representative UUIDs and verify that the fixture contains them."""
+    raw = task_cfg.get("representative_workloads")
+    section = "[[task.representative_workloads]]"
+    if not isinstance(raw, list):
+        raise SystemExit(
+            f"Error: {section} must define one name/uuid pair for each of: "
+            f"{', '.join(REPRESENTATIVE_WORKLOAD_LABELS)}."
+        )
+
+    configured: dict[str, str] = {}
+    seen_uuids: set[str] = set()
+    for i, entry in enumerate(raw, start=1):
+        if not isinstance(entry, dict):
+            raise SystemExit(f"Error: {section} entry {i} must be a table.")
+        name = entry.get("name")
+        workload_uuid = entry.get("uuid")
+        if not isinstance(name, str) or not name:
+            raise SystemExit(f"Error: {section} entry {i} has no string name.")
+        if not isinstance(workload_uuid, str) or not workload_uuid:
+            raise SystemExit(
+                f"Error: {section} entry {i} ({name!r}) has no string uuid."
+            )
+        if name in configured:
+            raise SystemExit(
+                f"Error: {section} defines representative name {name!r} more than once."
+            )
+        if workload_uuid in seen_uuids:
+            raise SystemExit(
+                f"Error: {section} assigns workload {workload_uuid!r} more than once."
+            )
+        configured[name] = workload_uuid
+        seen_uuids.add(workload_uuid)
+
+    expected = set(REPRESENTATIVE_WORKLOAD_LABELS)
+    actual = set(configured)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unknown = sorted(actual - expected)
+        details = []
+        if missing:
+            details.append(f"missing: {', '.join(missing)}")
+        if unknown:
+            details.append(f"unknown: {', '.join(unknown)}")
+        raise SystemExit(
+            f"Error: {section} names must be exactly "
+            f"{', '.join(REPRESENTATIVE_WORKLOAD_LABELS)} ({'; '.join(details)})."
+        )
+
+    try:
+        records = [
+            json.loads(line)
+            for line in workloads_path.read_text().splitlines()
+            if line.strip()
+        ]
+        available = {str(record["workload"]["uuid"]) for record in records}
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise SystemExit(
+            f"Error: could not read workload UUIDs from {workloads_path}: {exc}"
+        ) from exc
+
+    missing_uuids = [
+        f"{name}={configured[name]}"
+        for name in REPRESENTATIVE_WORKLOAD_LABELS
+        if configured[name] not in available
+    ]
+    if missing_uuids:
+        raise SystemExit(
+            f"Error: configured representative workload(s) not found in "
+            f"{workloads_path}: {', '.join(missing_uuids)}."
+        )
+
+    return {
+        name: configured[name]
+        for name in REPRESENTATIVE_WORKLOAD_LABELS
+    }
 
 
 def _server_command(repo_root: Path, workspace: Path) -> list[str]:
@@ -160,8 +241,8 @@ def _parse_args(argv=None):
         "--sort-workloads",
         action="store_true",
         help="Order the task's workload fixture smallest-to-largest before seeding "
-        "the tree, so representative selection is monotonic. Reports whether it "
-        "changed anything (a fixture that is already sorted is left untouched).",
+        "the tree. Named representatives are selected by UUID and are unaffected. "
+        "Reports whether the fixture changed.",
     )
     parser.add_argument(
         "--skip-baseline-benchmark",
@@ -212,6 +293,9 @@ def main(argv=None) -> int:
             f"Error: missing task fixture(s) in {task_dir}: "
             f"{', '.join(missing_fixtures)}."
         )
+    representative_workloads = _representative_workloads_from_config(
+        task_cfg, task_dir / "workloads.jsonl"
+    )
 
     # Resolve the required starting kernel: a path to a baseline solution .json
     # (relative to the workspace, or absolute) or "reference" (optimize the
@@ -279,10 +363,16 @@ def main(argv=None) -> int:
     os.chdir(workspace)
     try:
         # Record the selected adapter as the run-level state for the runtime tools.
-        write_benchmark_state({"adapter": adapter_name})
+        write_benchmark_state(
+            {
+                "adapter": adapter_name,
+                "representative_workloads": representative_workloads,
+            }
+        )
         adapter = get_adapter()
 
-        # Optionally order the workload fixture so representative selection is monotonic.
+        # Optionally canonicalize full-suite order. Named representatives resolve
+        # by UUID, so sorting cannot change the smoke/profile workload set.
         if args.sort_workloads:
             changed = adapter.sort_workloads_fixture()
             print(

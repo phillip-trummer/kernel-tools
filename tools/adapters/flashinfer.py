@@ -59,7 +59,10 @@ class FlashInferAdapter:
     flashinfer types never leave this class. The kernel's source language comes
     from the baseline's frozen build spec, not config."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self, representative_workloads: dict[str, str] | None = None
+    ) -> None:
+        self.representative_workloads = representative_workloads
         self.definition, self.workload_traces = _load_task()
 
     def benchmark(self, scope: str) -> list[WorkloadResult]:
@@ -71,10 +74,14 @@ class FlashInferAdapter:
         _append_solution_to_archive(solution)
         workloads = self.workload_traces
         if scope == "smoke":
-            workloads, _ = select_representative_workloads(workloads)
+            workloads, _ = select_representative_workloads(
+                workloads,
+                self.representative_workloads,
+                lambda trace: str(trace.workload.uuid),
+            )
         traces = _run_benchmark(self.definition, solution, workloads)
         _append_traces_to_archive(traces)
-        return _workload_results(traces)
+        return _workload_results(traces, self.representative_workloads)
 
     def benchmark_target(self, target_path: Path) -> tuple[list[WorkloadResult], str]:
         """Benchmark the target Solution at target_path (a .json file) against the
@@ -85,7 +92,7 @@ class FlashInferAdapter:
         _append_solution_to_archive(solution)
         traces = _run_benchmark(self.definition, solution, self.workload_traces)
         _append_traces_to_archive(traces)
-        return _workload_results(traces), solution.name
+        return _workload_results(traces, self.representative_workloads), solution.name
 
     def baseline_files(self, baseline_path: Path) -> list[tuple[str, str]]:
         """Load the baseline Solution at baseline_path (a .json file), freeze its
@@ -134,7 +141,11 @@ class FlashInferAdapter:
         workload's `axes` — the concrete axis-name -> integer shape declared by
         the task fixtures. Labels that collapse onto the same workload are
         deduped, so the result may have fewer than four entries."""
-        selected, labels = select_representative_workloads(self.workload_traces)
+        selected, labels = select_representative_workloads(
+            self.workload_traces,
+            self.representative_workloads,
+            lambda trace: str(trace.workload.uuid),
+        )
         return {label: dict(t.workload.axes) for label, t in zip(labels, selected)}
 
     def sort_workloads_fixture(self) -> bool:
@@ -227,7 +238,12 @@ class FlashInferAdapter:
     def build_profilable(self, label: str) -> tuple[Callable, list]:
         """Build the current src/ kernel and materialize one representative
         workload's inputs. Returns (runnable, inputs); call runnable(*inputs)."""
-        workload = representative_item_for_label(self.workload_traces, label).workload
+        workload = representative_item_for_label(
+            self.workload_traces,
+            label,
+            self.representative_workloads,
+            lambda trace: str(trace.workload.uuid),
+        ).workload
         runnable = _build_runnable(self.definition, self._build_solution())
         inputs = _materialize_inputs(self.definition, workload)
         return runnable, inputs
@@ -416,16 +432,31 @@ def _archive_dir() -> Path:
 
 
 # --- Neutral leaf mapping (one WorkloadResult per trace) ---
-def _workload_results(traces) -> list[WorkloadResult]:
+def _workload_results(
+    traces, representative_workloads: dict[str, str] | None = None
+) -> list[WorkloadResult]:
     """Map each flashinfer Trace to a neutral WorkloadResult leaf. Aggregation
     (geomean, representative pick, failure histogram) is shared harness code, not
     this adapter's job."""
     from flashinfer_bench.data import EvaluationStatus
 
-    return [_workload_result(t, EvaluationStatus) for t in traces]
+    names_by_uuid = {
+        workload_uuid: name
+        for name, workload_uuid in (representative_workloads or {}).items()
+    }
+    return [
+        _workload_result(
+            trace,
+            EvaluationStatus,
+            names_by_uuid.get(str(trace.workload.uuid)),
+        )
+        for trace in traces
+    ]
 
 
-def _workload_result(trace, EvaluationStatus) -> WorkloadResult:
+def _workload_result(
+    trace, EvaluationStatus, representative_name: str | None = None
+) -> WorkloadResult:
     passed = trace.evaluation.status == EvaluationStatus.PASSED
     perf = trace.evaluation.performance if passed else None
     return WorkloadResult(
@@ -445,6 +476,7 @@ def _workload_result(trace, EvaluationStatus) -> WorkloadResult:
         tolerance=_tolerance(),
         correctness=_correctness(trace),
         diagnostic=None if passed else _workload_diagnostic(trace),
+        representative_name=representative_name,
     )
 
 

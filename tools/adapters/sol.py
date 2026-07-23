@@ -81,7 +81,10 @@ class SOLAdapter:
     """Loads the task fixtures once, then exposes only neutral results — native
     SOL types never leave this class."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self, representative_workloads: dict[str, str] | None = None
+    ) -> None:
+        self.representative_workloads = representative_workloads
         self.definition, self.workloads = _load_task()
 
     def benchmark(self, scope: str) -> list[WorkloadResult]:
@@ -92,8 +95,13 @@ class SOLAdapter:
         _append_solution_to_archive(solution)
         workloads = self.workloads
         if scope == "smoke":
-            workloads, _ = select_representative_workloads(workloads)
-        return _evaluate(self.definition, solution, workloads)
+            workloads, _ = select_representative_workloads(
+                workloads,
+                self.representative_workloads,
+                lambda workload: str(workload.uuid),
+            )
+        results = _evaluate(self.definition, solution, workloads)
+        return self._mark_representatives(workloads, results)
 
     def benchmark_target(self, target_path: Path) -> tuple[list[WorkloadResult], str]:
         """Benchmark the target Solution at target_path against the full suite; it
@@ -101,7 +109,8 @@ class SOLAdapter:
         agent's kernel."""
         solution = self._load_solution_file(target_path)
         _append_solution_to_archive(solution)
-        return _evaluate(self.definition, solution, self.workloads), solution.name
+        results = _evaluate(self.definition, solution, self.workloads)
+        return self._mark_representatives(self.workloads, results), solution.name
 
     def baseline_files(self, baseline_path: Path) -> list[tuple[str, str]]:
         """Load the baseline Solution, freeze its build spec as the run's, and
@@ -138,8 +147,23 @@ class SOLAdapter:
 
     def representative_axes(self) -> dict[str, dict[str, int]]:
         """Map each representative label to its workload's concrete axes."""
-        selected, labels = select_representative_workloads(self.workloads)
+        selected, labels = select_representative_workloads(
+            self.workloads,
+            self.representative_workloads,
+            lambda workload: str(workload.uuid),
+        )
         return {label: dict(w.axes) for label, w in zip(labels, selected)}
+
+    def _mark_representatives(
+        self, workloads: list, results: list[WorkloadResult]
+    ) -> list[WorkloadResult]:
+        names_by_uuid = {
+            workload_uuid: name
+            for name, workload_uuid in (self.representative_workloads or {}).items()
+        }
+        for workload, result in zip(workloads, results):
+            result.representative_name = names_by_uuid.get(str(workload.uuid))
+        return results
 
     def sort_workloads_fixture(self) -> bool:
         """Order task/workloads.jsonl smallest-to-largest by total work so
@@ -229,7 +253,12 @@ class SOLAdapter:
         that keeps CUPTI — SOL's timer — out of the profiled process. A profiler
         and CUPTI cannot coexist (CUPTI_ERROR_MULTIPLE_SUBSCRIBERS_NOT_SUPPORTED),
         and the loser degrades silently, so measuring nothing looks like success."""
-        workload = representative_item_for_label(self.workloads, label)
+        workload = representative_item_for_label(
+            self.workloads,
+            label,
+            self.representative_workloads,
+            lambda workload: str(workload.uuid),
+        )
         solution = self._build_solution()
         staging = _stage_and_compile(self.definition, solution, [workload])
         return _load_runnable(solution, staging), _materialize_inputs(self.definition, workload)

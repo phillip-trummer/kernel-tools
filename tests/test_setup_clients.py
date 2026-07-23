@@ -6,6 +6,7 @@ from pathlib import Path
 from scripts.setup_workspace import (
     CLIENT_INSTRUCTIONS,
     _parse_args,
+    _representative_workloads_from_config,
     _server_command,
     _write_client_instructions,
     _write_mcp_config,
@@ -13,6 +14,36 @@ from scripts.setup_workspace import (
 
 
 class ClientBootstrapTests(unittest.TestCase):
+    def test_representative_workloads_are_loaded_by_name_and_uuid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workloads = Path(tmp) / "workloads.jsonl"
+            workloads.write_text(
+                "\n".join(
+                    json.dumps({"workload": {"uuid": workload_uuid}})
+                    for workload_uuid in ("s", "m", "l", "xl")
+                )
+            )
+            task_cfg = {
+                "representative_workloads": [
+                    {"name": "xlarge", "uuid": "xl"},
+                    {"name": "small", "uuid": "s"},
+                    {"name": "large", "uuid": "l"},
+                    {"name": "medium", "uuid": "m"},
+                ]
+            }
+
+            configured = _representative_workloads_from_config(task_cfg, workloads)
+
+            self.assertEqual(
+                configured,
+                {
+                    "small": "s",
+                    "medium": "m",
+                    "large": "l",
+                    "xlarge": "xl",
+                },
+            )
+
     def test_baseline_benchmark_is_enabled_by_default(self):
         self.assertFalse(_parse_args([]).skip_baseline_benchmark)
 

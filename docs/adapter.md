@@ -205,18 +205,23 @@ Both are optional. Skip them, and leave your adapter out of `TOOL_ADAPTERS`
 (`scripts/setup_workspace.py`), which lists the adapters each restricted tool
 supports; setup then aborts if a run exposes `profile_kernel` anyway.
 
-Representative selection is positional (`tools/_workloads.py`): return workloads
-ordered cheapest → most expensive and the labels line up. `src/` is a **flat** set
-of editable source files — setup rejects nested source paths.
+Representative selection is configured as four `name`/`uuid` pairs under
+`[[task.representative_workloads]]`. Setup verifies the UUIDs against the task
+fixture and freezes the mapping in run state; adapters provide their native UUID
+accessor to `tools/_workloads.py`. Positional selection remains a fallback for
+non-setup/test workspaces. `src/` is a **flat** set of editable source files —
+setup rejects nested source paths.
 
 ## Run-level state (`.state/benchmark.json`)
 
 Run constants the agent never needs live here (not on every `Evaluation`, not in
-agent-facing `tree.json`): the selected `adapter`, the frozen `build_spec`, and —
-as adapters need them — `environment` (lib versions), `timing_methodology`, and
-the oracle/normalizer/anchors config. Setup writes `{adapter}`; the adapter's
-`baseline_files()` merges in `build_spec` via `write_build_spec()`. This draws the
-product boundary: `tree.json` = agent-facing, `.state/benchmark.json` = internal.
+agent-facing `tree.json`): the selected `adapter`, named
+`representative_workloads`, the frozen `build_spec`, and — as adapters need them
+— `environment` (lib versions), `timing_methodology`, and the
+oracle/normalizer/anchors config. Setup writes the adapter and representatives;
+the adapter's `baseline_files()` merges in `build_spec` via
+`write_build_spec()`. This draws the product boundary: `tree.json` =
+agent-facing, `.state/benchmark.json` = internal.
 
 ## Checklist
 
@@ -226,7 +231,7 @@ product boundary: `tree.json` = agent-facing, `.state/benchmark.json` = internal
 4. Write `diagnostic` in agent vocabulary — strip build paths, name your own correctness gate, `None` not `""`.
 5. Raise `BenchmarkUnavailable` when the benchmark — not the kernel — is the thing that failed.
 6. Preserve `candidate_<hash16>` source-snapshot identity (used for dedup + cache keys).
-7. Keep the representative convention, or add explicit representative metadata and adapt `representative_axes()`.
+7. Resolve configured representative UUIDs for smoke runs, `representative_axes()`, and profiling, and mark their neutral leaves for aggregation.
 8. Run `scripts/setup_workspace.py`, then verify `benchmark_kernel(scope="smoke")`, `benchmark_kernel(scope="full")`, `profile_kernel` on one representative, and `log_experiment` after the full run.
 
 Each place a real benchmark can't map onto these types cleanly is a genuine find —

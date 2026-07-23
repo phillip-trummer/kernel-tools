@@ -128,6 +128,9 @@ class WorkloadResult(BaseModel):
     tolerance: Tolerance | None = None
     correctness: Correctness | None = None
     diagnostic: str | None = None  # human failure detail; None when passed
+    # Adapter-set run metadata used only while aggregating. The containing
+    # dictionary already carries the representative name, so do not serialize it.
+    representative_name: str | None = Field(default=None, exclude=True, repr=False)
 
     @model_validator(mode="after")
     def _validate_metrics(self) -> "WorkloadResult":

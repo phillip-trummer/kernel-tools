@@ -7,7 +7,7 @@ their types intact.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
 
 REPRESENTATIVE_WORKLOAD_LABELS = ("small", "medium", "large", "xlarge")
@@ -42,9 +42,24 @@ def representative_workload_indexes(n: int) -> dict[str, int]:
 def representative_items(
     items: list, result_labels: Optional[list[str]] = None
 ) -> list[tuple[str, object]]:
-    """Pair representative labels with items from a result list."""
+    """Pair representative labels with items from a result list.
+
+    Adapter-marked results take precedence over the positional fallback, keeping
+    UUID-selected representatives attached to a full benchmark result.
+    """
     if result_labels is not None:
         return list(zip(result_labels, items))
+    marked = {
+        label: item
+        for item in items
+        if (label := getattr(item, "representative_name", None)) is not None
+    }
+    if marked:
+        return [
+            (label, marked[label])
+            for label in REPRESENTATIVE_WORKLOAD_LABELS
+            if label in marked
+        ]
     seen: set[int] = set()
     out: list[tuple[str, object]] = []
     for label, idx in representative_workload_indexes(len(items)).items():
@@ -57,18 +72,42 @@ def representative_items(
 
 def select_representative_workloads(
     items: list,
+    representatives: dict[str, str] | None = None,
+    item_id: Callable[[object], str] | None = None,
 ) -> tuple[list, list[str]]:
-    """Pick the representative items for the fixed labels (types intact).
+    """Pick named representative items, by configured ID when supplied.
 
-    Returns (selected_items, labels) lined up one-for-one. For short lists,
-    labels that collapse onto the same position are deduped, so the result may
-    contain fewer than 4 entries.
+    The positional fallback supports non-setup workspaces and short test
+    fixtures.
     """
+    if representatives is not None:
+        if item_id is None:
+            raise ValueError("item_id is required for configured representatives")
+        by_id = {str(item_id(item)): item for item in items}
+        missing = [
+            f"{label}={workload_id}"
+            for label, workload_id in representatives.items()
+            if workload_id not in by_id
+        ]
+        if missing:
+            raise ValueError(
+                "configured representative workload(s) not found: "
+                + ", ".join(missing)
+            )
+        return (
+            [by_id[workload_id] for workload_id in representatives.values()],
+            list(representatives),
+        )
     pairs = representative_items(items)
     return [item for _, item in pairs], [label for label, _ in pairs]
 
 
-def representative_item_for_label(items: list, label: str):
+def representative_item_for_label(
+    items: list,
+    label: str,
+    representatives: dict[str, str] | None = None,
+    item_id: Callable[[object], str] | None = None,
+):
     """Return the item at a representative label's position (types intact)."""
     if label not in REPRESENTATIVE_WORKLOAD_LABELS:
         valid = ", ".join(REPRESENTATIVE_WORKLOAD_LABELS)
@@ -77,6 +116,11 @@ def representative_item_for_label(items: list, label: str):
         )
     if not items:
         raise ValueError("no workloads available")
+    if representatives is not None:
+        selected, labels = select_representative_workloads(
+            items, representatives, item_id
+        )
+        return dict(zip(labels, selected))[label]
     return _representative_item_by_label(items)[label]
 
 

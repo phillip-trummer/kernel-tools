@@ -1,11 +1,70 @@
 import unittest
+from dataclasses import dataclass
 
 from pydantic import ValidationError
 
 from tools._evaluation import Tolerance, WorkloadResult, aggregate, normalize_outcome
+from tools._workloads import (
+    representative_item_for_label,
+    select_representative_workloads,
+)
+
+
+@dataclass
+class _Workload:
+    uuid: str
 
 
 class EvaluationContractTests(unittest.TestCase):
+    def test_configured_representative_uuids_override_position(self):
+        workloads = [_Workload("a"), _Workload("b"), _Workload("c"), _Workload("d")]
+        configured = {
+            "small": "d",
+            "medium": "b",
+            "large": "a",
+            "xlarge": "c",
+        }
+
+        selected, labels = select_representative_workloads(
+            workloads, configured, lambda workload: workload.uuid
+        )
+
+        self.assertEqual(labels, list(configured))
+        self.assertEqual([workload.uuid for workload in selected], ["d", "b", "a", "c"])
+        self.assertEqual(
+            representative_item_for_label(
+                workloads, "large", configured, lambda workload: workload.uuid
+            ).uuid,
+            "a",
+        )
+
+    def test_aggregate_uses_named_representative_markers(self):
+        evaluation = aggregate(
+            [
+                WorkloadResult(outcome="PASSED", latency_ms=1.0),
+                WorkloadResult(
+                    outcome="PASSED",
+                    latency_ms=2.0,
+                    representative_name="xlarge",
+                ),
+                WorkloadResult(
+                    outcome="PASSED",
+                    latency_ms=3.0,
+                    representative_name="small",
+                ),
+            ]
+        )
+
+        self.assertEqual(
+            list(evaluation.representative_workloads),
+            ["small", "xlarge"],
+        )
+        dumped = evaluation.model_dump()
+        self.assertNotIn(
+            "representative_name",
+            dumped["representative_workloads"]["xlarge"],
+        )
+
     def test_latency_only_pass_is_scorable(self):
         evaluation = aggregate(
             [
