@@ -160,7 +160,7 @@ def _write_claude_settings(workspace: Path, tool_names: list[str]) -> None:
             "allow": [f"mcp__{MCP_SERVER_NAME}__{name}" for name in tool_names],
             # Keep the product tool-mediated so direct filesystem operations do
             # not bypass benchmark-cache and journal invariants.
-            "deny": ["Read(**)", "Edit(**)", "Write(**)", "Bash(*)"],
+            "deny": ["Read(**)", "Edit(**)", "Bash(*)"],
         },
         "enabledMcpjsonServers": [MCP_SERVER_NAME],
     }

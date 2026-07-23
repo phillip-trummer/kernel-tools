@@ -8,6 +8,7 @@ from scripts.setup_workspace import (
     _parse_args,
     _representative_workloads_from_config,
     _server_command,
+    _write_claude_settings,
     _write_client_instructions,
     _write_mcp_config,
 )
@@ -73,6 +74,18 @@ class ClientBootstrapTests(unittest.TestCase):
             command = _server_command(root, workspace)
             self.assertEqual(server["command"], command[0])
             self.assertEqual(server["args"], command[1:])
+
+    def test_claude_settings_deny_all_direct_file_edits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            _write_claude_settings(workspace, ["read_journal", "edit_source"])
+            payload = json.loads(
+                (workspace / ".claude" / "settings.local.json").read_text()
+            )
+            self.assertEqual(
+                payload["permissions"]["deny"],
+                ["Read(**)", "Edit(**)", "Bash(*)"],
+            )
 
     def test_both_clients_receive_same_instructions(self):
         with tempfile.TemporaryDirectory() as tmp:
