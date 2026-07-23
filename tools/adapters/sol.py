@@ -401,7 +401,7 @@ def _evaluate(definition, solution, workloads) -> list[WorkloadResult]:
             definition=definition,
             workloads=workloads,
             solution=solution,
-            config=BenchmarkConfig(),
+            config=BenchmarkConfig(benchmark_reference=True),
             output_dir=Path(staging),
             keep_output_dir=True,  # the context manager owns the directory
         )

@@ -7,19 +7,17 @@ MCP_SERVER_NAME = "kernel-tools"
 
 
 class LocalToolRegistry:
-    """Registry backing MCP list_tools and call_tool.
-
-    Tools self-register via ``@registry.register(SCHEMA)`` and operate on the
-    process cwd. The MCP server changes into its explicit workspace before it
-    accepts calls.
-    """
+    """A mock MCP registry. Tools self-register via @registry.register(SCHEMA),
+    and the agent loop calls dispatch(name, **input) without knowing what tools
+    exist. Tools operate on the process cwd; the agent-loop entry point (and an
+    MCP server) is responsible for os.chdir-ing into the workspace at startup."""
 
     def __init__(self):
         self.schemas: list[dict] = []
         self.handlers: dict[str, Callable] = {}
 
     def register(self, schema: dict):
-        """Register a handler with its intentionally hand-written MCP schema."""
+        """Decorator that mirrors the future @mcp.tool() entry point."""
         def decorator(func: Callable) -> Callable:
             name = schema["name"]
             self.schemas.append(schema)

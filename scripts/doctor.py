@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Non-destructive preflight for the MCP product, config, and task fixtures."""
+"""Non-destructive preflight for MCP, config, and task fixtures."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def main() -> int:
     raw_workspace = task_cfg.get("workspace_path")
     if not raw_workspace:
         failures.append("[task] workspace_path is required")
-        workspace = REPO / "workspace"
+        workspace = REPO / ".agent_workspace"
     else:
         workspace = Path(raw_workspace)
         if not workspace.is_absolute():
@@ -75,7 +75,8 @@ def main() -> int:
     except Exception as exc:
         failures.append(f"invalid tool configuration: {exc}")
 
-    if enabled and "profile_kernel" in enabled and shutil.which("ncu") is None:
+    exposed = enabled or ["profile_kernel"]
+    if "profile_kernel" in exposed and shutil.which("ncu") is None:
         warnings.append("profile_kernel is enabled but ncu is not on PATH")
     if shutil.which("claude") is None:
         warnings.append("Claude Code CLI not found (optional if using Codex)")

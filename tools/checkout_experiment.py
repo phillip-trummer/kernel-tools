@@ -12,7 +12,9 @@ SCHEMA = {
         "source as the current working kernel. Overwrites and removes "
         "files in the working source as needed. Any uncommitted edits to "
         "the working source are discarded — log first if you want to keep "
-        "them."
+        "them. To create a new branch, check out the experiment to branch "
+        "from, modify and fully benchmark the working kernel, then call "
+        "log_experiment; the new experiment will be recorded as its child."
     ),
     "input_schema": {
         "type": "object",

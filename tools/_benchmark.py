@@ -1,7 +1,8 @@
 """Portable benchmark-adapter interface — the product integration contract.
 
-The harness talks to benchmark frameworks only through this interface, so tools
-never handle a framework's native types. An adapter owns its task fixtures internally and
+The harness talks to whatever benchmark framework runs kernels (flashinfer
+today, SOL/kernelbench later) only through this interface, so tools never handle
+a framework's native types. An adapter owns its task fixtures internally and
 returns neutral results: a `TaskSpec`, and per-workload `WorkloadResult` leaves
 that shared harness code (`aggregate`) folds into the stored `Evaluation` (see
 _evaluation.py). No framework imports live here — adding a benchmark means adding

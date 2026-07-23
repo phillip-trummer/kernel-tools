@@ -3,10 +3,11 @@
 This module owns the tree's data shape end-to-end. Tools route every tree
 read and mutation through the helpers here so the on-disk schema (node
 fields, top-level keys, head/best pointers) can evolve in one file. The
-journal is a compact, agent-readable rendering of tree.json and is always
-regenerated from it — never hand-edited and never the source of truth.
-save_tree writes the json and re-renders the journal in a single call so
-the two stay in sync.
+on-disk journal is a complete rendering of tree.json and is always regenerated
+from it — never hand-edited and never the source of truth. Agent-sized frontier
+and branch views are rendered from the same state on demand. save_tree writes
+the json and re-renders the complete journal in a single call so the two stay
+in sync.
 """
 from __future__ import annotations
 
@@ -284,20 +285,66 @@ TOP_LEVEL_SCOPES = tuple(_TOP_LEVEL_KEY)
 
 # --- Rendering ---
 def render_journal(tree: dict) -> str:
+    """Render the complete experiment tree for the durable on-disk journal."""
+    return _render_journal_view(
+        tree,
+        title="Experiments",
+        node_ids=_ordered_nodes(tree["nodes"]),
+    )
+
+
+def render_frontier_journal(tree: dict) -> str:
+    """Render only branch tips while retaining the shared task and memory."""
+    frontier_ids = _frontier_node_ids(tree["nodes"])
+    total = len(tree["nodes"])
+    shown = len(frontier_ids)
+    trailer = (
+        f"_({shown} branch tip{'s' if shown != 1 else ''} shown from "
+        f"{total} experiment{'s' if total != 1 else ''}; pass experiment_id "
+        "to read_journal to inspect a full branch.)_"
+        if total
+        else None
+    )
+    return _render_journal_view(
+        tree,
+        title="Experiment frontiers",
+        node_ids=frontier_ids,
+        trailer=trailer,
+    )
+
+
+def render_branch_journal(tree: dict, experiment_id: str) -> str:
+    """Render the root-to-node lineage ending at experiment_id."""
+    return _render_journal_view(
+        tree,
+        title=f"Branch to `{experiment_id}`",
+        node_ids=_branch_node_ids(tree["nodes"], experiment_id),
+    )
+
+
+def _render_journal_view(
+    tree: dict,
+    *,
+    title: str,
+    node_ids: list[str],
+    trailer: Optional[str] = None,
+) -> str:
     lines: list[str] = ["# Optimization Journal", ""]
     lines.extend(_render_header(tree))
     lines.extend(_render_task_spec(tree))
 
-    lines.append("## Experiments")
+    lines.append(f"## {title}")
     lines.append("")
     nodes = tree["nodes"]
-    if not nodes:
+    if not node_ids:
         lines.append("_(none)_")
     else:
         target_label, target_ev = _target(tree)
-        for nid in _ordered_nodes(nodes):
+        for nid in node_ids:
             lines.extend(_render_node(nid, nodes[nid], target_label, target_ev))
             lines.append("")
+    if trailer:
+        lines.append(trailer)
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -478,7 +525,7 @@ def _render_head_move(tree: dict, node_id: str, lead: str, node_tag: str) -> str
     """Shared return shape for the tools that move head (log_experiment,
     checkout_experiment): a lead line, the live journal header (top-level state +
     curated memory sections), the node head now points at, and a pointer to the
-    full tree. Deliberately not the whole experiment list — that's read_journal."""
+    journal views. Deliberately not the whole experiment list."""
     lines = [lead, ""]
     lines.extend(_render_header(tree))
 
@@ -491,7 +538,7 @@ def _render_head_move(tree: dict, node_id: str, lead: str, node_tag: str) -> str
     n = len(tree["nodes"])
     lines.append(
         f"_({n} experiment{'s' if n != 1 else ''} total — call read_journal "
-        "for the full tree.)_"
+        "for branch tips, or pass experiment_id to inspect a full branch.)_"
     )
     return "\n".join(lines).rstrip() + "\n"
 
@@ -536,6 +583,40 @@ def _ordered_nodes(nodes: dict) -> list[str]:
         m = VN_RE.match(nid)
         return int(m.group(1)) if m else -1
     return sorted(nodes.keys(), key=order, reverse=True)
+
+
+def _frontier_node_ids(nodes: dict) -> list[str]:
+    """Branch tips: nodes that are not the parent of another logged node."""
+    parents = {
+        node["parent"]
+        for node in nodes.values()
+        if node["parent"] in nodes
+    }
+    return [nid for nid in _ordered_nodes(nodes) if nid not in parents]
+
+
+def _branch_node_ids(nodes: dict, experiment_id: str) -> list[str]:
+    """Root-to-node lineage for experiment_id.
+
+    The stored tree should be acyclic and every non-root parent should exist.
+    Raise a clear error if durable state has drifted instead of returning a
+    misleading partial branch.
+    """
+    if experiment_id not in nodes:
+        raise KeyError(experiment_id)
+
+    reverse_lineage: list[str] = []
+    seen: set[str] = set()
+    current: Optional[str] = experiment_id
+    while current is not None:
+        if current in seen:
+            raise ValueError(f"cycle detected in experiment lineage at {current!r}")
+        if current not in nodes:
+            raise ValueError(f"experiment lineage references missing parent {current!r}")
+        seen.add(current)
+        reverse_lineage.append(current)
+        current = nodes[current]["parent"]
+    return list(reversed(reverse_lineage))
 
 
 def _render_node(

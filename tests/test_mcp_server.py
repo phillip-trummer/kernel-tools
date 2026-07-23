@@ -37,8 +37,6 @@ class MCPServerIntegrationTests(unittest.TestCase):
                         "--config",
                         str(repo / "config.toml"),
                     ],
-                    # Preserve an alternate SDK path used by isolated verification
-                    # environments; normal installations do not need this.
                     env={"PYTHONPATH": os.environ.get("PYTHONPATH", "")},
                 )
                 async with stdio_client(parameters) as (read, write):

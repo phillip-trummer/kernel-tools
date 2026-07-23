@@ -170,7 +170,7 @@ latency + optional same-run speedup). "vs target" / "vs v0" are tree-derived
 ratios — same-run (via speedup) when a normalizer exists, else a noisier
 cross-run latency ratio.
 
-The common FlashInfer case is reference = oracle + live normalizer,
+The common case (flashinfer today) is reference = oracle + live normalizer,
 target/v0 = anchors. The types support latency-only and oracle-less setups; build
 the mode you need, keep the seam.
 

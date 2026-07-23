@@ -5,8 +5,8 @@ BenchmarkAdapter interface (see _benchmark.py) for flashinfer: `FlashInferAdapte
 owns the task fixtures (definition + workloads) so the harness never handles
 native flashinfer types (`Definition`, `Workload`, `Trace`, `Solution`,
 `EvaluationStatus`) — they stay inside this file, and only neutral results
-(WorkloadResult leaves, TaskSpec, runnable+inputs) cross the boundary. Another
-benchmark integration is scoped to a sibling adapter.
+(WorkloadResult leaves, TaskSpec, runnable+inputs) cross the boundary. A future
+swap of flashinfer-bench is scoped to this file plus a sibling adapter.
 
 flashinfer imports are deferred to function bodies so that `import tools`
 does not pull torch + flashinfer eagerly.

@@ -1,6 +1,6 @@
 """The neutral contracts every benchmark adapter emits and the tree stores.
 
-One shape across benchmark frameworks (FlashInfer and SOL are included):
+One shape across benchmark frameworks (flashinfer today, SOL/kernelbench later):
 `TaskSpec` describes the task (seeded onto the tree at setup), and `Evaluation`
 reports a benchmark run (stored per tree node). Each adapter converts its native
 fixtures/results into these, so nothing above the adapter sees native types.
@@ -78,7 +78,8 @@ class AxisField(BaseModel):
 
 
 class Tolerance(BaseModel):
-    """The numerical bar a candidate must clear to count as correct."""
+    """The numerical bar a candidate must clear to count as correct. Surfaced on
+    the task so the agent knows its slack before it fails."""
 
     max_atol: float | None = None
     max_rtol: float | None = None
@@ -110,7 +111,7 @@ class TaskSpec(BaseModel):
     outputs: dict[str, TensorField] = Field(default_factory=dict)
     reference: str = ""
     constraints: list = Field(default_factory=list)
-    tolerance: Tolerance | None = None  # shared run-wide bar, if one exists
+    tolerance: Tolerance | None = None  # the run's correctness bar, if known
 
 
 class WorkloadResult(BaseModel):
