@@ -78,7 +78,7 @@ class ClientBootstrapTests(unittest.TestCase):
     def test_claude_settings_deny_all_direct_file_edits(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            _write_claude_settings(workspace, ["read_journal", "edit_source"])
+            _write_claude_settings(workspace, ["read_memory", "edit_source"])
             payload = json.loads(
                 (workspace / ".claude" / "settings.local.json").read_text()
             )

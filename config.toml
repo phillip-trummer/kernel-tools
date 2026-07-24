@@ -1,8 +1,9 @@
 [tools]
-enabled = [
-  "read_source", "edit_source", "write_source", "benchmark_kernel",
-  "log_experiment", "read_journal", "annotate_journal",
-  "checkout_experiment", "diff_experiment",
+enabled = 
+[
+  "read_source", "edit_source", "write_source", "benchmark_kernel", 
+  "log_experiment", "read_memory", "update_memory", 
+  "checkout_experiment", "diff_experiment", "create_handoff"
 ]
 
 [task]

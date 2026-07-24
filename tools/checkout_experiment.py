@@ -1,27 +1,24 @@
-import shutil
-from pathlib import Path
-
+"""Restore an experiment within the active structural branch."""
 from tools.registry import registry
-from tools._workspace import SRC_DIR, resolve_experiment_dir
+from tools._workspace import restore_experiment
 from tools import _tree
+
 
 SCHEMA = {
     "name": "checkout_experiment",
     "description": (
-        "Move head to a previously logged experiment and restore its "
-        "source as the current working kernel. Overwrites and removes "
-        "files in the working source as needed. Any uncommitted edits to "
-        "the working source are discarded — log first if you want to keep "
-        "them. To create a new branch, check out the experiment to branch "
-        "from, modify and fully benchmark the working kernel, then call "
-        "log_experiment; the new experiment will be recorded as its child."
+        "Restore a logged experiment as the working kernel. During an active "
+        "structural branch, checkout is limited to that branch's base and its "
+        "own experiments, making it a branch-local rollback tool. Use "
+        "create_handoff to move across structures. Uncommitted working edits "
+        "are discarded."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "experiment_id": {
                 "type": "string",
-                "description": "Experiment id, e.g. 'v0_baseline' or 'v2_tiled'.",
+                "description": "Experiment id, e.g. 'e0_baseline' or 'e12_tiled'.",
             },
         },
         "required": ["experiment_id"],
@@ -31,36 +28,33 @@ SCHEMA = {
 
 @registry.register(SCHEMA)
 def checkout_experiment(experiment_id: str) -> str:
-    # Resolve the experiment snapshot.
-    exp_dir = resolve_experiment_dir(experiment_id)
-    if not isinstance(exp_dir, Path):
-        return f"Error: {exp_dir}"
-    exp_files = [p for p in exp_dir.iterdir() if p.is_file()]
-    if not exp_files:
-        return f"Error: experiment {experiment_id!r} has no source files; refusing to wipe working tree."
-
-    # Load tree and confirm the journal knows this node.
-    tree = _tree.load_tree()
-    if not _tree.has_node(tree, experiment_id):
+    # Load optimization memory
+    memory = _tree.load_memory()
+    if not _tree.has_experiment(memory, experiment_id):
         return (
-            f"Error: experiment {experiment_id!r} exists under experiments/ but "
-            "is missing from .state/tree.json; refusing to check out a node the "
-            "journal does not know about. Investigate the drift before proceeding."
+            f"Error: experiment {experiment_id!r} not found. "
+            f"Available: {_tree.list_experiment_ids(memory)}"
         )
 
-    # Mirror the snapshot into src/.
-    src_dir = SRC_DIR.resolve()
-    src_dir.mkdir(parents=True, exist_ok=True)
-    exp_names = {p.name for p in exp_files}
-    for stale in src_dir.iterdir():
-        if stale.is_file() and stale.name not in exp_names:
-            stale.unlink()
-    for p in exp_files:
-        shutil.copyfile(p, src_dir / p.name)
+    # Enforce branch boundary
+    active_id = memory["active_branch"]
+    if active_id:
+        branch = memory["branches"][active_id]
+        allowed = {branch["base_experiment"], *branch["experiments"]}
+        if experiment_id not in allowed:
+            return (
+                f"Error: experiment {experiment_id!r} is outside active branch "
+                f"{active_id!r}. Call create_handoff to start another structure "
+                "from that experiment."
+            )
 
-    # Advance head.
-    prev_head = _tree.get_head(tree)
-    _tree.set_head(tree, experiment_id)
-    _tree.save_tree(tree)
+    # Restore snapshot
+    restored = restore_experiment(experiment_id)
+    if isinstance(restored, str):
+        return f"Error: {restored}"
 
-    return _tree.render_checkout(tree, experiment_id, prev_head, len(exp_files))
+    # Advance head
+    previous_head = _tree.get_head(memory)
+    _tree.set_head(memory, experiment_id)
+    _tree.save_memory(memory)
+    return _tree.render_checkout(memory, experiment_id, previous_head, restored)

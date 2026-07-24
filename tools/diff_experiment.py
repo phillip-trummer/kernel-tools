@@ -26,7 +26,7 @@ SCHEMA = {
         "properties": {
             "experiment": {
                 "type": "string",
-                "description": "Experiment id to diff against, e.g. 'v2_tiled'.",
+                "description": "Experiment id to diff against, e.g. 'e2_tiled'.",
             },
             "filename": {
                 "type": "string",

@@ -1,18 +1,18 @@
 # Kernel Optimizer MCP
 
-An MCP server for correctness-preserving GPU kernel optimization. Claude Code
+An MCP server for GPU kernel optimization. Claude Code
 or Codex edits kernels through a constrained tool surface, benchmarks candidates,
-and records measured experiments in a persistent journal.
+and records measured experiments in a persistent Memory.
 
 ## Background
 
 Kernel optimization is a non-convex search: promising structural rewrites often
 regress before they improve, while long-running agents tend to protect the
-current kernel and carry unverified conclusions forward in free-form memory.
+current kernel and carry unverified conclusions forward in accumulated context and free-form memory.
 
 This project provides a *git for experiments*. Each logged node contains an
 exact source snapshot and full benchmark result; agents can branch, compare, and
-restore nodes without losing progress. A structured optimization journal carries
+restore nodes without losing progress. A structured optimization memory carries
 measured results, hypotheses, facts, and hazards across context resets while
 keeping qualitative claims distinct from evidence.
 
@@ -42,10 +42,8 @@ and an NVIDIA H100 NVL CUDA scaffold. `config.toml` already points to it; the
 FlashInfer comparison target is enabled as a performance yardstick, while
 `profile_kernel` is disabled by default.
 
-The flag stages the intentionally empty scaffold without adding its compile
-errors to the journal. Setup still benchmarks and records the target; the
-agent's first logged kernel becomes `v0`. Omit the flag when the baseline is
-runnable and should be measured as `v0_baseline`.
+The 'skip-baseline' flag stages the intentionally empty scaffold without adding its compile
+errors to the journal.
 
 Setup preserves `example-workspace/task/` and `archive/`, but resets the working
 source, experiment tree, cache, snapshots, and journal.

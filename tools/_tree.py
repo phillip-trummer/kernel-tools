@@ -1,14 +1,4 @@
-"""Durable state for the optimization tree: tree.json + optimization_journal.md.
-
-This module owns the tree's data shape end-to-end. Tools route every tree
-read and mutation through the helpers here so the on-disk schema (node
-fields, top-level keys, head/best pointers) can evolve in one file. The
-on-disk journal is a complete rendering of tree.json and is always regenerated
-from it — never hand-edited and never the source of truth. Agent-sized frontier
-and branch views are rendered from the same state on demand. save_tree writes
-the json and re-renders the complete journal in a single call so the two stay
-in sync.
-"""
+"""Durable state and rendering for the optimization memory."""
 from __future__ import annotations
 
 import json
@@ -20,13 +10,14 @@ from tools._workloads import REPRESENTATIVE_WORKLOAD_LABELS
 from tools._workspace import read_src_files, solution_name_from_src_files
 
 
-TREE_PATH = Path(".state/tree.json")
-JOURNAL_PATH = Path("optimization_journal.md")
+SCHEMA_VERSION = 2
+MEMORY_PATH = Path(".state/memory.json")
+MEMORY_VIEW_PATH = Path("optimization_memory.md")
 
-VN_RE = re.compile(r"^v(\d+)_")
+EXPERIMENT_RE = re.compile(r"^e(\d+)_")
+BRANCH_RE = re.compile(r"^b(\d+)_")
 
-# Scope names exposed by annotate_journal -> tree storage location.
-_NODE_FIELD = {
+_EXPERIMENT_FIELD = {
     "note": "notes",
     "profiling_observation": "profiling_observations",
 }
@@ -36,20 +27,19 @@ _TOP_LEVEL_KEY = {
     "hazard": "hazards",
 }
 
+PER_EXPERIMENT_SCOPES = tuple(_EXPERIMENT_FIELD)
+TOP_LEVEL_SCOPES = tuple(_TOP_LEVEL_KEY)
 
-# --- Persistence ---
-def bootstrap_tree(
+
+def bootstrap_memory(
     *,
     task: str,
     kernel_description: str,
     hardware: str,
     language: str,
 ) -> dict:
-    """Return a fresh tree with every schema key initialized to its empty value.
-    The single place the top-level schema is declared. Tools mutate values
-    within this shape and add/remove rows in `nodes` /
-    `best_by_representative_workload`, but never add or remove top-level keys."""
     return {
+        "schema_version": SCHEMA_VERSION,
         "task": task,
         "kernel_description": kernel_description,
         "hardware": hardware,
@@ -62,95 +52,153 @@ def bootstrap_tree(
         "best_by_representative_workload": {},
         "representative_workload_axes": {},
         "target": None,
+        "active_branch": None,
+        "frontier": [],
+        "branches": {},
+        "experiments": {},
         "open_hypotheses": [],
         "global_facts": [],
         "hazards": [],
-        "nodes": {},
     }
 
 
-def load_tree() -> dict:
-    """Load tree.json. Raises FileNotFoundError if the workspace has not been
-    bootstrapped — callers assume the bootstrap_tree schema is on disk and
-    accessing missing keys would fail with KeyError further down. Fail at the
-    boundary instead, with a message that points at the actual cause."""
-    if not TREE_PATH.is_file():
+def load_memory() -> dict:
+    # Load current state
+    if not MEMORY_PATH.is_file():
         raise FileNotFoundError(
-            f"{TREE_PATH} not found; run scripts/setup_workspace.py before invoking tree tools."
+            f"{MEMORY_PATH} not found; run scripts/setup_workspace.py before "
+            "invoking memory tools."
         )
-    return json.loads(TREE_PATH.read_text())
+    memory = json.loads(MEMORY_PATH.read_text())
+    if memory.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(
+            f"unsupported optimization memory schema "
+            f"{memory.get('schema_version')!r}; expected {SCHEMA_VERSION}"
+        )
+    return memory
 
 
-def save_tree(tree: dict) -> None:
-    """Persist tree.json and re-render the journal. Refreshes head_state from
-    the current working kernel hash before writing, so tree.json on disk and
-    the rendered journal always agree on whether head is clean/dirty."""
-    refresh_head_state(tree)
-    TREE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    TREE_PATH.write_text(json.dumps(tree, indent=2) + "\n")
-    JOURNAL_PATH.write_text(render_journal(tree))
+def save_memory(memory: dict) -> None:
+    # Refresh working state
+    refresh_head_state(memory)
+
+    # Persist canonical state
+    MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MEMORY_PATH.write_text(json.dumps(memory, indent=2) + "\n")
+
+    # Render readable memory
+    MEMORY_VIEW_PATH.write_text(render_memory(memory))
 
 
-# --- Reads ---
-def get_head(tree: dict) -> Optional[str]:
-    return tree["head"]
+def get_head(memory: dict) -> Optional[str]:
+    return memory["head"]
 
 
-def has_node(tree: dict, node_id: str) -> bool:
-    return node_id in tree["nodes"]
+def get_experiment(memory: dict, experiment_id: str) -> dict:
+    return memory["experiments"][experiment_id]
 
 
-def list_node_ids(tree: dict) -> list[str]:
-    return sorted(tree["nodes"].keys())
+def has_experiment(memory: dict, experiment_id: str) -> bool:
+    return experiment_id in memory["experiments"]
 
 
-def find_node_by_solution(tree: dict, solution_name: str) -> Optional[str]:
-    for node_id, node in tree["nodes"].items():
-        if node["solution"] == solution_name:
-            return node_id
+def list_experiment_ids(memory: dict) -> list[str]:
+    return sorted(memory["experiments"], key=_experiment_order)
+
+
+def has_branch(memory: dict, branch_id: str) -> bool:
+    return branch_id in memory["branches"]
+
+
+def list_branch_ids(memory: dict) -> list[str]:
+    return sorted(memory["branches"], key=_branch_order)
+
+
+def find_experiment_by_solution(memory: dict, solution_name: str) -> Optional[str]:
+    for experiment_id, experiment in memory["experiments"].items():
+        if experiment["solution"] == solution_name:
+            return experiment_id
     return None
 
 
-def refresh_head_state(tree: dict) -> None:
-    """Set tree['head_state'] to 'clean', 'dirty', or None depending on whether
-    the working kernel matches the head node's content hash. None when there
-    is nothing to compare against (head unset, head node missing, or src/
-    empty). Called by save_tree so tree.json always carries a current
-    head_state — kernel tools never touch this field."""
-    head = tree["head"]
-    head_node = tree["nodes"].get(head) if head else None
-    head_solution = head_node.get("solution") if head_node else None
-    src_files = read_src_files() if head_solution else []
-    if not head_solution or not src_files:
-        tree["head_state"] = None
+def find_branch_for_experiment(memory: dict, experiment_id: str) -> Optional[str]:
+    for branch_id, branch in memory["branches"].items():
+        if experiment_id in branch["experiments"]:
+            return branch_id
+    return None
+
+
+def parent_branch_id(memory: dict, branch_id: str) -> Optional[str]:
+    base = memory["branches"][branch_id]["base_experiment"]
+    return find_branch_for_experiment(memory, base) if base else None
+
+
+def active_branch(memory: dict) -> Optional[dict]:
+    branch_id = memory["active_branch"]
+    return memory["branches"].get(branch_id) if branch_id else None
+
+
+def refresh_head_state(memory: dict) -> None:
+    head = memory["head"]
+    experiment = memory["experiments"].get(head) if head else None
+    solution = experiment.get("solution") if experiment else None
+    files = read_src_files() if solution else []
+    if not solution or not files:
+        memory["head_state"] = None
         return
-    tree["head_state"] = (
-        "clean" if solution_name_from_src_files(src_files) == head_solution else "dirty"
+    memory["head_state"] = (
+        "clean" if solution_name_from_src_files(files) == solution else "dirty"
     )
 
 
-def next_version(tree: dict, experiments_dir: Path) -> int:
-    """Smallest vN+1 not yet used by any tree node or experiments/ snapshot dir."""
-    versions: list[int] = []
+def next_experiment_number(memory: dict, experiments_dir: Path) -> int:
+    numbers: list[int] = []
     if experiments_dir.is_dir():
-        for p in experiments_dir.iterdir():
-            if not p.is_dir():
-                continue
-            m = VN_RE.match(p.name)
-            if m:
-                versions.append(int(m.group(1)))
-    for nid in tree["nodes"]:
-        m = VN_RE.match(nid)
-        if m:
-            versions.append(int(m.group(1)))
-    return max(versions) + 1 if versions else 0
+        for path in experiments_dir.iterdir():
+            match = EXPERIMENT_RE.match(path.name) if path.is_dir() else None
+            if match:
+                numbers.append(int(match.group(1)))
+    for experiment_id in memory["experiments"]:
+        match = EXPERIMENT_RE.match(experiment_id)
+        if match:
+            numbers.append(int(match.group(1)))
+    return max(numbers) + 1 if numbers else 0
 
 
-# --- Mutations ---
-def add_node(
-    tree: dict,
+def next_branch_number(memory: dict) -> int:
+    numbers = []
+    for branch_id in memory["branches"]:
+        match = BRANCH_RE.match(branch_id)
+        if match:
+            numbers.append(int(match.group(1)))
+    return max(numbers) + 1 if numbers else 0
+
+
+def add_branch(
+    memory: dict,
     *,
-    node_id: str,
+    branch_id: str,
+    base_experiment: Optional[str],
+    strategy: str,
+) -> None:
+    memory["branches"][branch_id] = {
+        "base_experiment": base_experiment,
+        "strategy": strategy,
+        "state": "planned",
+        "experiments": [],
+        "representative": None,
+        "conclusion": None,
+    }
+    memory["active_branch"] = branch_id
+    if branch_id not in memory["frontier"]:
+        memory["frontier"].append(branch_id)
+
+
+def add_experiment(
+    memory: dict,
+    *,
+    experiment_id: str,
+    branch_id: str,
     parent: Optional[str],
     solution: str,
     description: str,
@@ -158,7 +206,7 @@ def add_node(
     evaluation: dict,
     initial_note: Optional[str] = None,
 ) -> None:
-    tree["nodes"][node_id] = {
+    memory["experiments"][experiment_id] = {
         "parent": parent,
         "solution": solution,
         "description": description,
@@ -167,103 +215,179 @@ def add_node(
         "notes": [initial_note] if initial_note else [],
         "profiling_observations": [],
     }
+    branch = memory["branches"][branch_id]
+    branch["experiments"].append(experiment_id)
+    branch["state"] = "active"
+    update_branch_representative(memory, branch_id, experiment_id)
 
 
-def set_head(tree: dict, node_id: str) -> None:
-    tree["head"] = node_id
+def add_baseline_branch(
+    memory: dict,
+    *,
+    branch_id: str,
+    experiment_id: str,
+    solution: str,
+    description: str,
+    tags: list[str],
+    evaluation: dict,
+    initial_note: Optional[str] = None,
+) -> None:
+    add_branch(
+        memory,
+        branch_id=branch_id,
+        base_experiment=None,
+        strategy=description,
+    )
+    add_experiment(
+        memory,
+        experiment_id=experiment_id,
+        branch_id=branch_id,
+        parent=None,
+        solution=solution,
+        description=description,
+        tags=tags,
+        evaluation=evaluation,
+        initial_note=initial_note,
+    )
+    memory["branches"][branch_id]["state"] = "complete"
+    memory["active_branch"] = None
 
 
-def update_bests(tree: dict, node_id: str, evaluation: dict) -> list[str]:
-    """Promote node to current_best / representative bests where it wins.
-    Returns a list of which pointers were updated. Ranks by speedup when present
-    (it cancels same-run machine noise), else by latency (lower = better) — one
-    rule, derived per the run's available metric, no stored primary flag."""
+def complete_branch(
+    memory: dict,
+    branch_id: str,
+    conclusion: str,
+    keep_on_frontier: bool,
+) -> None:
+    branch = memory["branches"][branch_id]
+    branch["state"] = "complete"
+    branch["conclusion"] = conclusion
+    if keep_on_frontier:
+        if branch_id not in memory["frontier"]:
+            memory["frontier"].append(branch_id)
+    elif branch_id in memory["frontier"]:
+        memory["frontier"].remove(branch_id)
+
+
+def set_head(memory: dict, experiment_id: str) -> None:
+    memory["head"] = experiment_id
+
+
+def update_branch_representative(
+    memory: dict,
+    branch_id: str,
+    experiment_id: str,
+) -> bool:
+    branch = memory["branches"][branch_id]
+    current_id = branch["representative"]
+    if current_id is None:
+        branch["representative"] = experiment_id
+        return True
+
+    new_evaluation = memory["experiments"][experiment_id]["evaluation"]
+    current_evaluation = memory["experiments"][current_id]["evaluation"]
+    new_scorable = _scorable(new_evaluation)
+    current_scorable = _scorable(current_evaluation)
+    if (new_scorable and not current_scorable) or (
+        new_scorable and _geomean_better(new_evaluation, current_evaluation)
+    ) or (not new_scorable and not current_scorable):
+        branch["representative"] = experiment_id
+        return True
+    return False
+
+
+def update_bests(memory: dict, experiment_id: str, evaluation: dict) -> list[str]:
     updated: list[str] = []
-    nodes = tree["nodes"]
+    experiments = memory["experiments"]
 
-    cur_id = tree["current_best"]
-    cur_ev = nodes[cur_id]["evaluation"] if cur_id else None
-    if _geomean_better(evaluation, cur_ev):
-        tree["current_best"] = node_id
+    current_id = memory["current_best"]
+    current_evaluation = experiments[current_id]["evaluation"] if current_id else None
+    if _geomean_better(evaluation, current_evaluation):
+        memory["current_best"] = experiment_id
         updated.append("current_best")
 
-    by_rep = tree["best_by_representative_workload"]
+    bests = memory["best_by_representative_workload"]
     for label, result in evaluation["representative_workloads"].items():
         if result["outcome"] != "PASSED":
             continue
-        cur_rid = by_rep.get(label)
-        cur_result = (
-            nodes[cur_rid]["evaluation"]["representative_workloads"].get(label)
-            if cur_rid
+        current_id = bests.get(label)
+        current_result = (
+            experiments[current_id]["evaluation"]["representative_workloads"].get(label)
+            if current_id
             else None
         )
-        if _result_better(result, cur_result):
-            by_rep[label] = node_id
+        if _result_better(result, current_result):
+            bests[label] = experiment_id
             updated.append(label)
-
     return updated
 
 
-def _geomean_better(new_ev: dict, cur_ev: Optional[dict]) -> bool:
-    """Is new_ev's geomean better than cur_ev's? Speedup (higher) if present,
-    else latency (lower). A candidate with no scorable geomean never wins."""
-    return _metric_better(
-        new_ev.get("geomean_speedup_factor"), new_ev.get("geomean_latency_ms"),
-        (cur_ev or {}).get("geomean_speedup_factor"), (cur_ev or {}).get("geomean_latency_ms"),
+def _scorable(evaluation: dict) -> bool:
+    return (
+        evaluation.get("geomean_speedup_factor") is not None
+        or evaluation.get("geomean_latency_ms") is not None
     )
 
 
-def _result_better(new_result: dict, cur_result: Optional[dict]) -> bool:
-    """Same speedup-then-latency rule for one representative workload."""
+def _geomean_better(new: dict, current: Optional[dict]) -> bool:
     return _metric_better(
-        new_result.get("speedup_factor"), new_result.get("latency_ms"),
-        (cur_result or {}).get("speedup_factor"), (cur_result or {}).get("latency_ms"),
+        new.get("geomean_speedup_factor"),
+        new.get("geomean_latency_ms"),
+        (current or {}).get("geomean_speedup_factor"),
+        (current or {}).get("geomean_latency_ms"),
+    )
+
+
+def _result_better(new: dict, current: Optional[dict]) -> bool:
+    return _metric_better(
+        new.get("speedup_factor"),
+        new.get("latency_ms"),
+        (current or {}).get("speedup_factor"),
+        (current or {}).get("latency_ms"),
     )
 
 
 def _metric_better(
-    new_speedup: Optional[float], new_latency: Optional[float],
-    cur_speedup: Optional[float], cur_latency: Optional[float],
+    new_speedup: Optional[float],
+    new_latency: Optional[float],
+    current_speedup: Optional[float],
+    current_latency: Optional[float],
 ) -> bool:
-    """True if the new (speedup, latency) beats the current. Speedup wins when
-    the new run reports one (higher better); otherwise latency (lower better).
-    Within a run every eval comes from the same adapter, so the metric is
-    consistent across candidates."""
     if new_speedup is not None:
-        return cur_speedup is None or new_speedup > cur_speedup
+        return current_speedup is None or new_speedup > current_speedup
     if new_latency is None:
         return False
-    return cur_latency is None or new_latency < cur_latency
+    return current_latency is None or new_latency < current_latency
 
 
-def _annotation_list(tree: dict, scope: str, experiment_id: Optional[str]) -> list[str]:
-    """The mutable annotation list for a scope: a node's notes / profiling_observations
-    (per-experiment) or a top-level open_hypotheses / global_facts / hazards list. The
-    single place scope names map to storage, so add/edit/render address the same slot."""
-    if scope in _NODE_FIELD:
-        return tree["nodes"][experiment_id][_NODE_FIELD[scope]]
-    return tree[_TOP_LEVEL_KEY[scope]]
+def _annotation_list(
+    memory: dict,
+    scope: str,
+    experiment_id: Optional[str],
+) -> list[str]:
+    if scope in _EXPERIMENT_FIELD:
+        return memory["experiments"][experiment_id][_EXPERIMENT_FIELD[scope]]
+    return memory[_TOP_LEVEL_KEY[scope]]
 
 
 def add_annotation(
-    tree: dict, scope: str, text: str, experiment_id: Optional[str] = None
+    memory: dict,
+    scope: str,
+    text: str,
+    experiment_id: Optional[str] = None,
 ) -> None:
-    """Append a new entry to the scope's annotation list."""
-    _annotation_list(tree, scope, experiment_id).append(text)
+    _annotation_list(memory, scope, experiment_id).append(text)
 
 
 def edit_annotation(
-    tree: dict,
+    memory: dict,
     scope: str,
     old_text: str,
     new_text: Optional[str],
     experiment_id: Optional[str] = None,
 ) -> Optional[str]:
-    """Replace (new_text given) or remove (new_text None) the single entry whose text
-    contains old_text. Returns an error message when zero or several entries match — so
-    the caller surfaces it without mutating — otherwise edits in place and returns None."""
-    items = _annotation_list(tree, scope, experiment_id)
-    matches = [i for i, item in enumerate(items) if old_text in item]
+    items = _annotation_list(memory, scope, experiment_id)
+    matches = [index for index, item in enumerate(items) if old_text in item]
     if not matches:
         return f"Error: no {scope!r} entry contains {old_text!r}."
     if len(matches) > 1:
@@ -279,449 +403,505 @@ def edit_annotation(
     return None
 
 
-PER_EXPERIMENT_SCOPES = tuple(_NODE_FIELD)
-TOP_LEVEL_SCOPES = tuple(_TOP_LEVEL_KEY)
-
-
-# --- Rendering ---
-def render_journal(tree: dict) -> str:
-    """Render the complete experiment tree for the durable on-disk journal."""
-    return _render_journal_view(
-        tree,
-        title="Experiments",
-        node_ids=_ordered_nodes(tree["nodes"]),
-    )
-
-
-def render_frontier_journal(tree: dict) -> str:
-    """Render only branch tips while retaining the shared task and memory."""
-    frontier_ids = _frontier_node_ids(tree["nodes"])
-    total = len(tree["nodes"])
-    shown = len(frontier_ids)
-    trailer = (
-        f"_({shown} branch tip{'s' if shown != 1 else ''} shown from "
-        f"{total} experiment{'s' if total != 1 else ''}; pass experiment_id "
-        "to read_journal to inspect a full branch.)_"
-        if total
-        else None
-    )
-    return _render_journal_view(
-        tree,
-        title="Experiment frontiers",
-        node_ids=frontier_ids,
-        trailer=trailer,
-    )
-
-
-def render_branch_journal(tree: dict, experiment_id: str) -> str:
-    """Render the root-to-node lineage ending at experiment_id."""
-    return _render_journal_view(
-        tree,
-        title=f"Branch to `{experiment_id}`",
-        node_ids=_branch_node_ids(tree["nodes"], experiment_id),
-    )
-
-
-def _render_journal_view(
-    tree: dict,
-    *,
-    title: str,
-    node_ids: list[str],
-    trailer: Optional[str] = None,
-) -> str:
-    lines: list[str] = ["# Optimization Journal", ""]
-    lines.extend(_render_header(tree))
-    lines.extend(_render_task_spec(tree))
-
-    lines.append(f"## {title}")
-    lines.append("")
-    nodes = tree["nodes"]
-    if not node_ids:
-        lines.append("_(none)_")
-    else:
-        target_label, target_ev = _target(tree)
-        for nid in node_ids:
-            lines.extend(_render_node(nid, nodes[nid], target_label, target_ev))
-            lines.append("")
-    if trailer:
-        lines.append(trailer)
-
+def render_memory(memory: dict) -> str:
+    lines = ["# Optimization Memory", ""]
+    lines.extend(_render_header(memory))
+    lines.extend(_render_task_spec(memory))
+    lines.extend(_render_branch_collection(memory, list_branch_ids(memory), full=True))
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _render_header(tree: dict) -> list[str]:
-    """Metadata, target/best/head, and the curated memory sections — everything
-    above the per-experiment list. Reused by render_commit so a commit echoes the
-    live top-level state and surfaces empty memory sections at the moment the
-    agent has fresh interpretation to record."""
-    lines: list[str] = []
+def render_frontier_memory(memory: dict) -> str:
+    lines = ["# Optimization Memory", ""]
+    lines.extend(_render_header(memory))
+    lines.extend(_render_task_spec(memory))
+    branch_ids = [
+        branch_id
+        for branch_id in memory["frontier"]
+        if branch_id in memory["branches"]
+    ]
+    lines.extend(_render_branch_collection(memory, branch_ids, full=False))
+    lines.append(
+        f"_({len(branch_ids)} frontier structure"
+        f"{'s' if len(branch_ids) != 1 else ''} shown from "
+        f"{len(memory['branches'])} total; pass branch_id to read_memory "
+        "to inspect its complete experiment history.)_"
+    )
+    return "\n".join(lines).rstrip() + "\n"
 
-    lines.append(f"- **Task:** {tree['task']}")
-    if tree["kernel_description"]:
-        lines.append(f"- **Kernel:** {tree['kernel_description']}")
-    lines.append(f"- **Hardware:** {tree['hardware']}")
-    lines.append(f"- **Language:** {tree['language']}")
-    axes_by_label = tree.get("representative_workload_axes") or {}
-    present = [
+
+def render_branch_memory(memory: dict, branch_id: str) -> str:
+    lines = ["# Optimization Memory", ""]
+    lines.extend(_render_header(memory))
+    lines.extend(_render_task_spec(memory))
+    lines.extend(_render_branch_collection(memory, [branch_id], full=True))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_branch_collection(
+    memory: dict,
+    branch_ids: list[str],
+    *,
+    full: bool,
+) -> list[str]:
+    lines = ["## Structural branches", ""]
+    if not branch_ids:
+        lines.extend(["_(none)_", ""])
+        return lines
+    for branch_id in branch_ids:
+        lines.extend(_render_branch(memory, branch_id, full=full))
+        lines.append("")
+    return lines
+
+
+def _render_header(memory: dict) -> list[str]:
+    lines = [f"- **Task:** {memory['task']}"]
+    if memory["kernel_description"]:
+        lines.append(f"- **Kernel:** {memory['kernel_description']}")
+    lines.extend(
+        [
+            f"- **Hardware:** {memory['hardware']}",
+            f"- **Language:** {memory['language']}",
+        ]
+    )
+    axes_by_label = memory.get("representative_workload_axes") or {}
+    labels = [
         label
         for label in REPRESENTATIVE_WORKLOAD_LABELS
         if axes_by_label.get(label)
     ]
-    if present:
+    if labels:
         lines.append("- **Representative workloads:**")
-        for label in present:
-            axes_str = ", ".join(f"{k}={v}" for k, v in axes_by_label[label].items())
-            lines.append(f"  - {label}: {axes_str}")
+        for label in labels:
+            axes = ", ".join(
+                f"{key}={value}" for key, value in axes_by_label[label].items()
+            )
+            lines.append(f"  - {label}: {axes}")
     lines.append("")
 
-    head = tree["head"]
-    cur_best = tree["current_best"]
-    target_label, target_ev = _target(tree)
+    target_label, target_evaluation = _target(memory)
     if target_label is not None:
         lines.append(
-            f"- **Target:** `{target_label}` — {_evaluation_summary(target_ev)}"
+            f"- **Target:** `{target_label}` — "
+            f"{_evaluation_summary(target_evaluation)}"
         )
-        lines.extend(_representative_workload_lines(target_ev))
-    if cur_best:
-        ev = tree["nodes"][cur_best]["evaluation"]
+        lines.extend(_representative_workload_lines(target_evaluation))
+
+    current_best = memory["current_best"]
+    if current_best:
+        evaluation = memory["experiments"][current_best]["evaluation"]
         lines.append(
-            f"- **Current best:** `{cur_best}` — "
-            f"{_evaluation_summary(ev, target_label, target_ev)}"
+            f"- **Current best:** `{current_best}` — "
+            f"{_evaluation_summary(evaluation, target_label, target_evaluation)}"
         )
     else:
         lines.append("- **Current best:** _(unset)_")
-    by_rep = tree["best_by_representative_workload"]
-    if by_rep:
-        bests_str = ", ".join(
-            f"{label}=`{by_rep[label]}`"
+
+    bests = memory["best_by_representative_workload"]
+    if bests:
+        rendered = ", ".join(
+            f"{label}=`{bests[label]}`"
             for label in REPRESENTATIVE_WORKLOAD_LABELS
-            if label in by_rep
+            if label in bests
         )
-        lines.append(f"- **Best by representative workload:** {bests_str}")
+        lines.append(f"- **Best by representative workload:** {rendered}")
+
+    head = memory["head"]
     if head:
-        suffix = " _(dirty — working kernel has diverged from head)_" if tree["head_state"] == "dirty" else ""
+        suffix = (
+            " _(dirty — working kernel has diverged from head)_"
+            if memory["head_state"] == "dirty"
+            else ""
+        )
         lines.append(f"- **Head:** `{head}`{suffix}")
     else:
         lines.append("- **Head:** _(unset)_")
     lines.append("")
 
+    lines.extend(_render_active_branch(memory))
     for title, key in (
         ("Open hypotheses", "open_hypotheses"),
         ("Global facts", "global_facts"),
         ("Hazards", "hazards"),
     ):
-        lines.append(f"## {title}")
-        items = tree[key]
-        if items:
-            for item in items:
-                lines.append(f"- {item}")
-        else:
-            lines.append("_(none)_")
+        lines.extend([f"## {title}", ""])
+        items = memory[key]
+        lines.extend((f"- {item}" for item in items) if items else ["_(none)_"])
         lines.append("")
-
     return lines
 
 
-def _render_task_spec(tree: dict) -> list[str]:
-    """The full task contract — operation, axes, tensor signatures, constraints,
-    and the reference implementation — so the agent can read the complete task
-    from the journal alone. Lives only in the full journal, never in the header
-    echoed by every commit/checkout, where the reference code would be noise."""
-    spec = tree.get("task_spec") or {}
+def _render_active_branch(memory: dict) -> list[str]:
+    lines = ["## Active structural branch", ""]
+    branch_id = memory["active_branch"]
+    if branch_id is None:
+        lines.extend(
+            [
+                "_(none — call create_handoff to assign the next structural strategy)_",
+                "",
+            ]
+        )
+        return lines
+    branch = memory["branches"][branch_id]
+    lines.extend(
+        [
+            f"- **Branch:** `{branch_id}` ({branch['state']})",
+            (
+                f"- **Base experiment:** `{branch['base_experiment']}`"
+                if branch["base_experiment"]
+                else "- **Base experiment:** _(working kernel)_"
+            ),
+            f"- **Strategy:** {branch['strategy']}",
+            "",
+        ]
+    )
+    return lines
+
+
+def _render_branch(memory: dict, branch_id: str, *, full: bool) -> list[str]:
+    branch = memory["branches"][branch_id]
+    parent_branch = parent_branch_id(memory, branch_id)
+    lines = [f"### `{branch_id}` ({branch['state']})"]
+    lines.append(
+        f"- **Parent branch:** `{parent_branch}`"
+        if parent_branch
+        else "- **Parent branch:** _(root)_"
+    )
+    lines.append(
+        f"- **Base experiment:** `{branch['base_experiment']}`"
+        if branch["base_experiment"]
+        else "- **Base experiment:** _(none)_"
+    )
+    lines.append(f"- **Strategy:** {branch['strategy']}")
+    representative = branch["representative"]
+    lines.append(
+        f"- **Representative:** `{representative}`"
+        if representative
+        else "- **Representative:** _(no experiment logged yet)_"
+    )
+    if branch["conclusion"]:
+        lines.append(f"- **Conclusion:** {branch['conclusion']}")
+
+    experiment_ids = branch["experiments"] if full else ([representative] if representative else [])
+    if experiment_ids:
+        target_label, target_evaluation = _target(memory)
+        lines.append("- **Experiments:**")
+        for experiment_id in experiment_ids:
+            lines.extend(
+                _indent(
+                    _render_experiment(
+                        experiment_id,
+                        memory["experiments"][experiment_id],
+                        target_label,
+                        target_evaluation,
+                        heading_level=0,
+                    ),
+                    "  ",
+                )
+            )
+    return lines
+
+
+def _indent(lines: list[str], prefix: str) -> list[str]:
+    return [prefix + line if line else line for line in lines]
+
+
+def _render_task_spec(memory: dict) -> list[str]:
+    spec = memory.get("task_spec") or {}
     if not spec:
         return []
     lines = ["## Task specification", ""]
-
-    # The fixed build contract the working kernel must honor (entry symbol,
-    # calling convention, available dependencies) — read once, never tuned.
-    contract = tree.get("build_contract")
+    contract = memory.get("build_contract")
     if contract:
         lines.append(f"- **Build contract:** {contract}")
-
     if spec.get("op_type"):
         lines.append(f"- **Operation:** {spec['op_type']}")
-
-    # The numerical bar the working kernel must clear to count as correct.
     tolerance = spec.get("tolerance")
     if tolerance:
-        desc = _tolerance_desc(tolerance)
-        if desc:
-            lines.append(f"- **Correctness tolerance:** {desc}")
-
-    # Axes define the workload space: which dims are fixed vs. vary across workloads.
+        description = _tolerance_desc(tolerance)
+        if description:
+            lines.append(f"- **Correctness tolerance:** {description}")
     axes = spec.get("axes") or {}
     if axes:
         lines.append("- **Axes:**")
         for name, axis in axes.items():
             lines.append(f"  - `{name}`: {_axis_desc(axis)}")
-
     for title, key in (("Inputs", "inputs"), ("Outputs", "outputs")):
         fields = spec.get(key) or {}
-        if not fields:
-            continue
-        lines.append(f"- **{title}:**")
-        for name, field in fields.items():
-            lines.append(f"  - `{name}`: {_tensor_desc(field)}")
-
+        if fields:
+            lines.append(f"- **{title}:**")
+            for name, field in fields.items():
+                lines.append(f"  - `{name}`: {_tensor_desc(field)}")
     constraints = spec.get("constraints") or []
     if constraints:
         lines.append("- **Constraints:**")
-        for c in constraints:
-            lines.append(f"  - {c}")
-
-    # Reference implementation: the ground-truth semantics correctness is checked against.
+        lines.extend(f"  - {constraint}" for constraint in constraints)
     reference = spec.get("reference") or ""
     if reference:
-        lines.append("- **Reference implementation:**")
-        lines.append("")
-        lines.append("```python")
-        lines.extend(reference.splitlines())
-        lines.append("```")
-
+        lines.extend(
+            [
+                "- **Reference implementation:**",
+                "",
+                "```python",
+                *reference.splitlines(),
+                "```",
+            ]
+        )
     lines.append("")
     return lines
 
 
 def _axis_desc(axis: dict) -> str:
-    """One axis: a const value, a derived expression, or 'var', plus its optional
-    description."""
     kind = axis.get("kind", "var")
     if kind == "const":
         head = f"const = {axis.get('value')}"
     elif kind == "expr":
-        expr = axis.get("expression")
-        head = f"expr = {expr}" if expr else "expr"
+        expression = axis.get("expression")
+        head = f"expr = {expression}" if expression else "expr"
     else:
         head = kind
-    desc = axis.get("description")
-    return f"{head} — {desc}" if desc else head
+    description = axis.get("description")
+    return f"{head} — {description}" if description else head
 
 
-def _tolerance_desc(tol: dict) -> str:
-    """The correctness bar as one line: the tolerances and the required match
-    ratio the adapter surfaced."""
+def _tolerance_desc(tolerance: dict) -> str:
     parts = []
-    if tol.get("max_rtol") is not None:
-        parts.append(f"rtol {tol['max_rtol']}")
-    if tol.get("max_atol") is not None:
-        parts.append(f"atol {tol['max_atol']}")
-    ratio = tol.get("required_matched_ratio")
+    if tolerance.get("max_rtol") is not None:
+        parts.append(f"rtol {tolerance['max_rtol']}")
+    if tolerance.get("max_atol") is not None:
+        parts.append(f"atol {tolerance['max_atol']}")
+    ratio = tolerance.get("required_matched_ratio")
     if ratio is not None:
         parts.append(f"≥{ratio:.0%} of elements within tolerance")
     return ", ".join(parts)
 
 
 def _tensor_desc(field: dict) -> str:
-    """One input/output tensor: shape, dtype, optional description. A null shape
-    (a scalar argument) renders as 'scalar'."""
     shape = field.get("shape")
-    shape_str = f"[{', '.join(map(str, shape))}]" if shape else "scalar"
-    base = f"{shape_str} {field.get('dtype', '?')}"
-    desc = field.get("description")
-    return f"{base} — {desc}" if desc else base
+    shape_text = f"[{', '.join(map(str, shape))}]" if shape else "scalar"
+    base = f"{shape_text} {field.get('dtype', '?')}"
+    description = field.get("description")
+    return f"{base} — {description}" if description else base
 
 
-def _render_head_move(tree: dict, node_id: str, lead: str, node_tag: str) -> str:
-    """Shared return shape for the tools that move head (log_experiment,
-    checkout_experiment): a lead line, the live journal header (top-level state +
-    curated memory sections), the node head now points at, and a pointer to the
-    journal views. Deliberately not the whole experiment list."""
-    lines = [lead, ""]
-    lines.extend(_render_header(tree))
-
-    target_label, target_ev = _target(tree)
-    node_lines = _render_node(node_id, tree["nodes"][node_id], target_label, target_ev)
-    node_lines[0] += f" — {node_tag}"
-    lines.extend(node_lines)
-    lines.append("")
-
-    n = len(tree["nodes"])
-    lines.append(
-        f"_({n} experiment{'s' if n != 1 else ''} total — call read_journal "
-        "for branch tips, or pass experiment_id to inspect a full branch.)_"
+def render_commit(memory: dict, experiment_id: str) -> str:
+    branch_id = find_branch_for_experiment(memory, experiment_id)
+    lines = [f"Logged {experiment_id} on branch {branch_id}.", ""]
+    lines.extend(_render_header(memory))
+    target_label, target_evaluation = _target(memory)
+    lines.extend(
+        _render_experiment(
+            experiment_id,
+            memory["experiments"][experiment_id],
+            target_label,
+            target_evaluation,
+        )
+    )
+    lines.extend(
+        [
+            "",
+            f"_({len(memory['experiments'])} experiments across "
+            f"{len(memory['branches'])} structural branches — call read_memory "
+            "for the frontier or pass branch_id for its full history.)_",
+        ]
     )
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_commit(tree: dict, node_id: str) -> str:
-    """log_experiment's return value. Echoing the node's recorded evaluation also
-    signals that speedup numbers need not be restated in notes."""
-    return _render_head_move(tree, node_id, f"Logged {node_id}.", "NEW")
-
-
-def render_checkout(tree: dict, node_id: str, prev_head: Optional[str], n_files: int) -> str:
-    """checkout_experiment's return value. Head and the working kernel just
-    changed, so re-ground the agent on the global picture and the experiment it
-    now sits on — the same shape a commit returns."""
-    lead = (
-        f"Checked out {node_id} (head was {prev_head!r}); mirrored {n_files} "
-        "file(s) into the working kernel."
+def render_checkout(
+    memory: dict,
+    experiment_id: str,
+    previous_head: Optional[str],
+    file_count: int,
+) -> str:
+    lines = [
+        f"Checked out {experiment_id} (head was {previous_head!r}); restored "
+        f"{file_count} file(s) into the working kernel.",
+        "",
+    ]
+    lines.extend(_render_header(memory))
+    target_label, target_evaluation = _target(memory)
+    lines.extend(
+        _render_experiment(
+            experiment_id,
+            memory["experiments"][experiment_id],
+            target_label,
+            target_evaluation,
+        )
     )
-    return _render_head_move(tree, node_id, lead, "HEAD")
+    return "\n".join(lines).rstrip() + "\n"
 
 
-def render_annotation(tree: dict, scope: str, experiment_id: Optional[str] = None) -> str:
-    """annotate_journal's return value: the current contents of the slot just
-    appended to, so accumulation (and staleness) is visible at the moment the
-    agent adds to it. Lighter than the full header — annotate is an incremental
-    act, often called several times in a row."""
-    if scope in _NODE_FIELD:
-        field = _NODE_FIELD[scope]
-        items = tree["nodes"][experiment_id][field]
+def render_handoff(
+    memory: dict,
+    branch_id: str,
+    file_count: int,
+    is_bootstrap: bool,
+) -> str:
+    branch = memory["branches"][branch_id]
+    base = branch["base_experiment"]
+    restored = (
+        f" Restored `{base}` into the working kernel ({file_count} file(s))."
+        if base
+        else ""
+    )
+    next_action = (
+        "This is the initial assignment. Implement and fully tune this branch now; "
+        "finish the session by creating its handoff."
+        if is_bootstrap
+        else "End this optimization session. The next session should read_memory and "
+        "implement only this branch before creating another handoff."
+    )
+    return (
+        f"Created structural branch `{branch_id}`.{restored}\n\n"
+        f"- **Strategy:** {branch['strategy']}\n"
+        f"- **State:** planned\n\n"
+        f"{next_action}"
+    )
+
+
+def render_annotation(
+    memory: dict,
+    scope: str,
+    experiment_id: Optional[str] = None,
+) -> str:
+    if scope in _EXPERIMENT_FIELD:
+        field = _EXPERIMENT_FIELD[scope]
+        items = memory["experiments"][experiment_id][field]
         lines = [f"`{experiment_id}` {field.replace('_', ' ')}:"]
     else:
         key = _TOP_LEVEL_KEY[scope]
-        items = tree[key]
+        items = memory[key]
         lines = [f"{key.replace('_', ' ').capitalize()}:"]
     lines.extend(f"- {item}" for item in items)
     return "\n".join(lines)
 
 
-def _ordered_nodes(nodes: dict) -> list[str]:
-    """Newest first by vN prefix; non-conforming ids fall back to insertion order."""
-    def order(nid: str) -> int:
-        m = VN_RE.match(nid)
-        return int(m.group(1)) if m else -1
-    return sorted(nodes.keys(), key=order, reverse=True)
+def _experiment_order(experiment_id: str) -> tuple[int, int, str]:
+    match = EXPERIMENT_RE.match(experiment_id)
+    if match:
+        return (0, int(match.group(1)), experiment_id)
+    return (-1, -1, experiment_id)
 
 
-def _frontier_node_ids(nodes: dict) -> list[str]:
-    """Branch tips: nodes that are not the parent of another logged node."""
-    parents = {
-        node["parent"]
-        for node in nodes.values()
-        if node["parent"] in nodes
-    }
-    return [nid for nid in _ordered_nodes(nodes) if nid not in parents]
+def _branch_order(branch_id: str) -> tuple[int, str]:
+    match = BRANCH_RE.match(branch_id)
+    return (int(match.group(1)), branch_id) if match else (-1, branch_id)
 
 
-def _branch_node_ids(nodes: dict, experiment_id: str) -> list[str]:
-    """Root-to-node lineage for experiment_id.
-
-    The stored tree should be acyclic and every non-root parent should exist.
-    Raise a clear error if durable state has drifted instead of returning a
-    misleading partial branch.
-    """
-    if experiment_id not in nodes:
-        raise KeyError(experiment_id)
-
-    reverse_lineage: list[str] = []
-    seen: set[str] = set()
-    current: Optional[str] = experiment_id
-    while current is not None:
-        if current in seen:
-            raise ValueError(f"cycle detected in experiment lineage at {current!r}")
-        if current not in nodes:
-            raise ValueError(f"experiment lineage references missing parent {current!r}")
-        seen.add(current)
-        reverse_lineage.append(current)
-        current = nodes[current]["parent"]
-    return list(reversed(reverse_lineage))
-
-
-def _render_node(
-    node_id: str, node: dict, target_label: Optional[str], target_ev: Optional[dict]
+def _render_experiment(
+    experiment_id: str,
+    experiment: dict,
+    target_label: Optional[str],
+    target_evaluation: Optional[dict],
+    *,
+    heading_level: int = 4,
 ) -> list[str]:
-    ev = node["evaluation"]
-    lines = [f"### `{node_id}` ({ev['status']})"]
-
-    parent = node["parent"]
+    evaluation = experiment["evaluation"]
+    prefix = f"{'#' * heading_level} " if heading_level else ""
+    lines = [f"{prefix}`{experiment_id}` ({evaluation['status']})"]
+    parent = experiment["parent"]
     lines.append(f"- **Parent:** `{parent}`" if parent else "- **Parent:** _(root)_")
-    if node["tags"]:
-        lines.append(f"- **Tags:** {', '.join(node['tags'])}")
-    if node["description"]:
-        lines.append(f"- **Description:** {node['description']}")
-
-    lines.append(f"- **Evaluation:** {_evaluation_summary(ev, target_label, target_ev)}")
-    lines.extend(_representative_workload_lines(ev, target_label, target_ev))
-
+    if experiment["tags"]:
+        lines.append(f"- **Tags:** {', '.join(experiment['tags'])}")
+    if experiment["description"]:
+        lines.append(f"- **Description:** {experiment['description']}")
+    lines.append(
+        f"- **Evaluation:** "
+        f"{_evaluation_summary(evaluation, target_label, target_evaluation)}"
+    )
+    lines.extend(
+        _representative_workload_lines(
+            evaluation,
+            target_label,
+            target_evaluation,
+        )
+    )
     lines.append("- **Notes:**")
-    if node["notes"]:
-        for n in node["notes"]:
-            lines.append(f"  - {n}")
-    else:
-        lines.append("  - _(none)_")
+    lines.extend(
+        (f"  - {note}" for note in experiment["notes"])
+        if experiment["notes"]
+        else ["  - _(none)_"]
+    )
     lines.append("- **Profiling observations:**")
-    if node["profiling_observations"]:
-        for o in node["profiling_observations"]:
-            lines.append(f"  - {o}")
-    else:
-        lines.append("  - _(none)_")
+    lines.extend(
+        (f"  - {observation}" for observation in experiment["profiling_observations"])
+        if experiment["profiling_observations"]
+        else ["  - _(none)_"]
+    )
     return lines
 
 
-
-def _target(tree: dict) -> tuple[Optional[str], Optional[dict]]:
-    """(label, evaluation) for the target, or (None, None)."""
-    tgt = tree.get("target")
-    if not tgt:
+def _target(memory: dict) -> tuple[Optional[str], Optional[dict]]:
+    target = memory.get("target")
+    if not target:
         return None, None
-    return tgt["label"], tgt["evaluation"]
+    return target["label"], target["evaluation"]
 
 
 def _evaluation_summary(
-    ev: dict,
+    evaluation: dict,
     target_label: Optional[str] = None,
-    target_ev: Optional[dict] = None,
+    target_evaluation: Optional[dict] = None,
 ) -> str:
-    parts = [ev["status"]]
-    count = ev.get("workload_count")
+    parts = [evaluation["status"]]
+    count = evaluation.get("workload_count")
     over = f" over {count} workloads" if count else ""
-    geomean = ev.get("geomean_speedup_factor")
+    geomean = evaluation.get("geomean_speedup_factor")
     if geomean is not None:
         parts.append(f"geomean {geomean:.2f}× vs reference{over}")
     else:
-        latency = ev.get("geomean_latency_ms")
+        latency = evaluation.get("geomean_latency_ms")
         if latency is not None:
             parts.append(f"geomean {_fmt_ms(latency)}{over}")
-    target_ratio = _target_geomean_ratio(ev, target_ev)
-    if target_label is not None and target_ratio is not None:
-        parts.append(f"{target_ratio:.2f}× vs {target_label}")
+    ratio = _target_geomean_ratio(evaluation, target_evaluation)
+    if target_label is not None and ratio is not None:
+        parts.append(f"{ratio:.2f}× vs {target_label}")
     return "; ".join(parts)
 
 
-def _fmt_ms(ms: float) -> str:
-    """Compact latency: milliseconds, dropping trailing precision."""
-    return f"{ms:.4g} ms"
+def _fmt_ms(milliseconds: float) -> str:
+    return f"{milliseconds:.4g} ms"
 
 
 def _representative_workload_lines(
-    ev: dict,
+    evaluation: dict,
     target_label: Optional[str] = None,
-    target_ev: Optional[dict] = None,
+    target_evaluation: Optional[dict] = None,
 ) -> list[str]:
-    lines: list[str] = []
-    reps = ev["representative_workloads"]
-    target_reps = target_ev.get("representative_workloads", {}) if target_ev else {}
+    lines = []
+    representatives = evaluation["representative_workloads"]
+    target_representatives = (
+        target_evaluation.get("representative_workloads", {})
+        if target_evaluation
+        else {}
+    )
     for label in REPRESENTATIVE_WORKLOAD_LABELS:
-        if label not in reps:
+        if label not in representatives:
             continue
-        r = reps[label]
-        outcome = r["outcome"]
+        result = representatives[label]
+        outcome = result["outcome"]
         line = f"  - representative {label}: {outcome}"
         if outcome == "PASSED":
             metrics = []
-            spd = r.get("speedup_factor")
-            if spd is not None:
-                metrics.append(f"{spd:.2f}× vs reference")
-            elif r.get("latency_ms") is not None:
-                metrics.append(_fmt_ms(r["latency_ms"]))
-            target_ratio = _target_representative_workload_ratio(
-                r,
-                target_reps.get(label),
+            speedup = result.get("speedup_factor")
+            if speedup is not None:
+                metrics.append(f"{speedup:.2f}× vs reference")
+            elif result.get("latency_ms") is not None:
+                metrics.append(_fmt_ms(result["latency_ms"]))
+            ratio = _target_representative_workload_ratio(
+                result,
+                target_representatives.get(label),
             )
-            if target_label is not None and target_ratio is not None:
-                metrics.append(f"{target_ratio:.2f}× vs {target_label}")
+            if target_label is not None and ratio is not None:
+                metrics.append(f"{ratio:.2f}× vs {target_label}")
             if metrics:
                 line += f"; {'; '.join(metrics)}"
         else:
-            # The bar only matters next to a miss; on a pass the header's
-            # run-wide tolerance already says what was cleared.
-            tolerance = r.get("tolerance")
-            if tolerance:
-                rendered = _format_tolerance(tolerance)
-                if rendered:
-                    line += f"; tolerance {rendered}"
+            tolerance = result.get("tolerance")
+            rendered = _format_tolerance(tolerance) if tolerance else ""
+            if rendered:
+                line += f"; tolerance {rendered}"
         lines.append(line)
     return lines
 
@@ -739,12 +919,17 @@ def _format_tolerance(tolerance: dict) -> str:
     return ", ".join(parts)
 
 
-def _target_geomean_ratio(ev: dict, target_ev: Optional[dict]) -> Optional[float]:
-    if target_ev is None:
+def _target_geomean_ratio(
+    evaluation: dict,
+    target_evaluation: Optional[dict],
+) -> Optional[float]:
+    if target_evaluation is None:
         return None
     return _vs_target(
-        ev.get("geomean_speedup_factor"), ev.get("geomean_latency_ms"),
-        target_ev.get("geomean_speedup_factor"), target_ev.get("geomean_latency_ms"),
+        evaluation.get("geomean_speedup_factor"),
+        evaluation.get("geomean_latency_ms"),
+        target_evaluation.get("geomean_speedup_factor"),
+        target_evaluation.get("geomean_latency_ms"),
     )
 
 
@@ -755,28 +940,28 @@ def _target_representative_workload_ratio(
     if target_result is None:
         return None
     return _vs_target(
-        result.get("speedup_factor"), result.get("latency_ms"),
-        target_result.get("speedup_factor"), target_result.get("latency_ms"),
+        result.get("speedup_factor"),
+        result.get("latency_ms"),
+        target_result.get("speedup_factor"),
+        target_result.get("latency_ms"),
     )
 
 
 def _vs_target(
-    speedup: Optional[float], latency: Optional[float],
-    target_speedup: Optional[float], target_latency: Optional[float],
+    speedup: Optional[float],
+    latency: Optional[float],
+    target_speedup: Optional[float],
+    target_latency: Optional[float],
 ) -> Optional[float]:
-    """Candidate-vs-target ratio where >1 means the candidate is faster.
-
-    When both were normalized against a same-run reference, compare speedups —
-    each run measures its own reference beside the candidate, so the ratio is
-    less sensitive to cold/throttled/co-located GPU runs. With no reference
-    (latency-only), fall back to the cross-run latency ratio
-    target_latency / candidate_latency (noisier — a cross-run comparison)."""
     if speedup is not None and target_speedup is not None:
         return _ratio(speedup, target_speedup)
     return _ratio(target_latency, latency)
 
 
-def _ratio(numerator: Optional[float], denominator: Optional[float]) -> Optional[float]:
+def _ratio(
+    numerator: Optional[float],
+    denominator: Optional[float],
+) -> Optional[float]:
     if numerator is None or denominator in (None, 0):
         return None
     return numerator / denominator

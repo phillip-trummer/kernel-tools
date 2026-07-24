@@ -25,7 +25,7 @@ class MCPServerIntegrationTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 workspace = Path(tmp)
                 (workspace / ".state").mkdir()
-                (workspace / ".state" / "tree.json").write_text(json.dumps({}))
+                (workspace / ".state" / "memory.json").write_text(json.dumps({}))
                 (workspace / "src").mkdir()
                 (workspace / "src" / "kernel.cu").write_text("// kernel\n")
                 parameters = StdioServerParameters(

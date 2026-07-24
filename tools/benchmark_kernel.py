@@ -88,7 +88,7 @@ def _format_for_agent(evaluation, scope: str) -> dict:
     """Project the lossless Evaluation into a compact, agent-facing payload.
 
     Concrete representative axes and the run-wide tolerance are already durable
-    in the journal. Repeating them on every benchmark call costs context without
+    in memory. Repeating them on every benchmark call costs context without
     adding information, so this view carries performance for passes and only the
     tolerance/correctness/diagnostic detail needed to explain failures. The
     cached Evaluation remains unchanged.

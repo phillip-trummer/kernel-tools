@@ -31,7 +31,7 @@ SCHEMA = {
             },
             "experiment_id": {
                 "type": "string",
-                "description": "Optional. Read from a previously logged experiment (e.g. 'v2_tiled') instead of the working tree.",
+                "description": "Optional. Read from a previously logged experiment (e.g. 'e2_tiled') instead of the working tree.",
             },
             "offset": {
                 "type": "integer",

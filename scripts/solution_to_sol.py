@@ -8,10 +8,10 @@ carries over unchanged.
 
     python scripts/solution_to_sol.py --list
     python scripts/solution_to_sol.py --out /tmp/sol/mla
-    python scripts/solution_to_sol.py v3_tensor_cores --out /tmp/sol/mla \
+    python scripts/solution_to_sol.py e3_tensor_cores --out /tmp/sol/mla \
         --workspace ../mla-experiments/6_journal/run_1/.agent_workspace
 
-Defaults to the tree's current best experiment. SOL never copies safetensors into
+Defaults to the memory's current best experiment. SOL never copies safetensors into
 its staging directory; it resolves them against FLASHINFER_TRACE_DIR, and our
 task/ holds them under the same dataset-relative paths — so that variable points
 back at the workspace, and the printed command sets it.
@@ -28,6 +28,11 @@ import shutil
 import sys
 import tomllib
 from pathlib import Path
+
+try:
+    from scripts._experiment_state import experiment_records, load_experiment_state
+except ModuleNotFoundError:
+    from _experiment_state import experiment_records, load_experiment_state
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -50,11 +55,13 @@ def _default_workspace() -> Path:
     return path if path.is_absolute() else REPO_ROOT / path
 
 
-def _read_tree(workspace: Path) -> dict:
-    path = workspace / ".state" / "tree.json"
-    if not path.is_file():
-        raise SystemExit(f"Error: no experiment tree at {path} — is {workspace} a set-up workspace?")
-    return json.loads(path.read_text())
+def _read_state(workspace: Path) -> dict:
+    experiment_state, path = load_experiment_state(workspace, workspace=True)
+    if path is None:
+        raise SystemExit(
+            f"Error: no experiment state under {workspace} — is it a set-up workspace?"
+        )
+    return experiment_state
 
 
 def _read_solution(workspace: Path, name: str) -> dict:
@@ -102,7 +109,7 @@ def _missing_blobs(task_dir: Path, workloads: list[dict]) -> list[str]:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("experiment", nargs="?", help="Experiment to export (default: the tree's current best).")
+    parser.add_argument("experiment", nargs="?", help="Experiment to export (default: the current best).")
     parser.add_argument("--list", action="store_true", help="List the experiments available to export.")
     parser.add_argument("--out", type=Path, help="Problem directory to write.")
     parser.add_argument("--workspace", type=Path, default=None, help="Workspace root (default: [task] workspace_path).")
@@ -111,23 +118,28 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     workspace = (args.workspace or _default_workspace()).resolve()
-    tree = _read_tree(workspace)
+    experiment_state = _read_state(workspace)
+    experiments = experiment_records(experiment_state)
 
     if args.list:
-        for name, node in tree["nodes"].items():
-            best = " (current best)" if name == tree.get("current_best") else ""
-            print(f"{name:24} {node['solution']}{best}")
+        for name, experiment_node in experiments.items():
+            best = (
+                " (current best)"
+                if name == experiment_state.get("current_best")
+                else ""
+            )
+            print(f"{name:24} {experiment_node['solution']}{best}")
         return 0
 
-    experiment = args.experiment or tree.get("current_best")
-    if experiment not in tree["nodes"]:
+    experiment = args.experiment or experiment_state.get("current_best")
+    if experiment not in experiments:
         raise SystemExit(f"Error: experiment {experiment!r} not found. Use --list to see the available ones.")
     if not args.out:
         raise SystemExit("Error: pass --out to name the problem directory to write.")
     if args.out.exists() and not args.force:
         raise SystemExit(f"Error: {args.out} already exists — pass --force to replace it.")
 
-    solution = _read_solution(workspace, tree["nodes"][experiment]["solution"])
+    solution = _read_solution(workspace, experiments[experiment]["solution"])
     solution["spec"] = _translate_spec(solution["spec"], args.hardware)
 
     task_dir = workspace / "task"

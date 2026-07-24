@@ -2,7 +2,7 @@
 
 This is the one seam a systems engineer implements to point the whole tool suite
 at **their own** kernel and benchmark. Everything above it — the working-kernel
-tools, the experiment journal, the plots — sees only neutral results and never a
+tools, the optimization memory, the plots — sees only neutral results and never a
 framework's native types. Implement one adapter (build + run + score their
 kernel) and the suite works on top.
 
@@ -32,7 +32,7 @@ adapter-neutral. To add an adapter: write a sibling module, return it from
 
 An adapter produces exactly two kinds of neutral value.
 
-### 1. `TaskSpec` — the task description (seeded onto the tree at setup)
+### 1. `TaskSpec` — the task description (seeded into memory at setup)
 
 ```python
 class TaskSpec(BaseModel):
@@ -42,13 +42,13 @@ class TaskSpec(BaseModel):
     axes: dict[str, AxisField] = {}      # {const|var|expr, value?, expression?, description?}
     inputs: dict[str, TensorField] = {}  # {shape?, dtype, description?}   (shape None = scalar)
     outputs: dict[str, TensorField] = {}
-    reference: str = ""                  # the reference implementation, shown in the journal
+    reference: str = ""                  # the reference implementation, shown in memory
     constraints: list = []               # optional descriptive bullets
     tolerance: Tolerance | None = None   # the correctness bar: {max_atol?, max_rtol?, required_matched_ratio?}
 ```
 
-The journal renders the task from this alone, so the agent can continue from the
-tree after a context reset. `axes`/`inputs`/`outputs` have an **explicit** schema
+The memory renders the task from this alone, so the agent can continue after a
+context reset. `axes`/`inputs`/`outputs` have an **explicit** schema
 (not an opaque dict) — surface expression axes via `AxisField.expression`.
 
 `TaskSpec.tolerance` is the run's shared bar when one exists. Frameworks that set
@@ -162,11 +162,11 @@ Two orthogonal roles keep the types clean:
   vs. the starting kernel, or none ("just runs / no NaN").
 - **Speed baselines** — what you compare latency against: an optional **live
   normalizer** (timed same-run → the `speedup_factor`) and **pinned anchors**
-  (the target, the v0 baseline — comparisons the *journal* derives from stored
+  (the target, the e0 baseline — comparisons the *memory* derives from stored
   numbers, not fields on `Evaluation`).
 
 Consequences: `Evaluation` is **self-contained** (correctness verdict + absolute
-latency + optional same-run speedup). "vs target" / "vs v0" are tree-derived
+latency + optional same-run speedup). "vs target" / "vs e0" are memory-derived
 ratios — same-run (via speedup) when a normalizer exists, else a noisier
 cross-run latency ratio.
 
@@ -215,12 +215,12 @@ setup rejects nested source paths.
 ## Run-level state (`.state/benchmark.json`)
 
 Run constants the agent never needs live here (not on every `Evaluation`, not in
-agent-facing `tree.json`): the selected `adapter`, named
+agent-facing `memory.json`): the selected `adapter`, named
 `representative_workloads`, the frozen `build_spec`, and — as adapters need them
 — `environment` (lib versions), `timing_methodology`, and the
 oracle/normalizer/anchors config. Setup writes the adapter and representatives;
 the adapter's `baseline_files()` merges in `build_spec` via
-`write_build_spec()`. This draws the product boundary: `tree.json` =
+`write_build_spec()`. This draws the product boundary: `memory.json` =
 agent-facing, `.state/benchmark.json` = internal.
 
 ## Checklist

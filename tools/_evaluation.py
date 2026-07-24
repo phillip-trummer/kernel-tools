@@ -98,9 +98,9 @@ class Correctness(BaseModel):
 
 
 class TaskSpec(BaseModel):
-    """Neutral description of the task, seeded onto the tree at setup. The
-    journal header and the agent's prompt read it from the tree — never from a
-    native fixture — so the agent can continue from the tree alone. Each adapter
+    """Neutral description of the task, seeded into memory at setup. The
+    memory header and the agent's prompt read it from memory — never from a
+    native fixture — so the agent can continue from memory alone. Each adapter
     maps its own task into these fields."""
 
     name: str
@@ -152,7 +152,7 @@ class WorkloadResult(BaseModel):
 
 
 class Evaluation(BaseModel):
-    """The aggregate one tree node stores — built by `aggregate()`, never by an
+    """The aggregate one experiment stores — built by `aggregate()`, never by an
     adapter. `geomean_latency_ms` is the always-present ground truth;
     `geomean_speedup_factor` is present only when a reference was timed same-run.
     Ranking derives its metric: speedup if present, else latency (lower better) —

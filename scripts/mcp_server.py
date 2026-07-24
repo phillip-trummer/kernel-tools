@@ -52,9 +52,9 @@ def _debug(message: str) -> None:
         print(f"[kernel-tools] {message}", file=sys.stderr, flush=True)
 
 
-if not (WORKSPACE / ".state" / "tree.json").is_file():
+if not (WORKSPACE / ".state" / "memory.json").is_file():
     raise SystemExit(
-        f"Error: {WORKSPACE} is not initialized (missing .state/tree.json). "
+        f"Error: {WORKSPACE} is not initialized (missing .state/memory.json). "
         "Run scripts/setup_workspace.py first."
     )
 if not CONFIG.is_file():

@@ -1,13 +1,4 @@
-"""Initialize a kernel-optimization workspace for an MCP client.
-
-The user supplies the task fixtures under <workspace>/task/ in the configured
-adapter's native format. This wipes prior-run state (src/, experiments/,
-.state/, optimization_journal.md) but never task/, then seeds the tree from the
-adapter: the neutral task spec, representative shapes, and journal header become
-tree state, so the journal renders the task from the tree. Finally it stages the
-baseline's sources into src/, freezes the baseline's build spec as the run's
-build spec, and optionally benchmarks and logs it as `v0_baseline`.
-"""
+"""Initialize a kernel-optimization workspace for an MCP client."""
 from __future__ import annotations
 
 import argparse
@@ -158,8 +149,7 @@ def _write_claude_settings(workspace: Path, tool_names: list[str]) -> None:
     settings = {
         "permissions": {
             "allow": [f"mcp__{MCP_SERVER_NAME}__{name}" for name in tool_names],
-            # Keep the product tool-mediated so direct filesystem operations do
-            # not bypass benchmark-cache and journal invariants.
+            # Preserve tool-mediated state invariants
             "deny": ["Read(**)", "Edit(**)", "Bash(*)"],
         },
         "enabledMcpjsonServers": [MCP_SERVER_NAME],
@@ -173,13 +163,25 @@ CLIENT_INSTRUCTIONS = """You are a GPU kernel performance engineer.
 
 Use the kernel tools to optimize the kernel. The goal is to minimize latency.
 
-Start by reading the optimization journal. It is the only state carried across
-iterations: it records the task and build contract, the head and current-best
-experiments, measured results, prior branches, profiling observations, open
-hypotheses, facts, and hazards.
+Start by reading the optimization memory. It is the only state carried across
+sessions. It records the active structural branch, frontier structures, exact
+experiments, measured results, profiling observations, hypotheses, facts, and
+hazards.
 
-Revisit conclusions inherited from the journal when new evidence conflicts
-with them, and replace or remove stale annotations instead of allowing them to
+If setup left no active branch, use create_handoff once to assign this first
+session a concrete structural strategy. This initial bootstrap is the only
+nonterminal create_handoff call.
+
+One logical optimization session owns exactly one structural branch. Implement
+the active branch's assigned structure, then spend the remaining session tuning
+that structure. Fully benchmark and log every informative attempt, including
+regressions and correctness failures. End the session with create_handoff,
+which records the branch conclusion, assigns one genuinely different structure
+to the next session, and restores its selected base experiment. Do not begin
+the handed-off structure in the current session.
+
+Revisit conclusions inherited from memory when new evidence conflicts with
+them, and replace or remove stale annotations instead of allowing them to
 harden into false constraints.
 
 Do not infer a bottleneck or dismiss a hypothesis without evidence. Try promising rewrites
@@ -188,10 +190,8 @@ change after its first regression or correctness failure; give the new
 structure a fair implementation and tuning budget. Continue exploring genuinely
 different structures while you can identify a plausible untried one.
 
-This is an optimization experiment, not a production kernel. Use
-`checkout_experiment` to branch from recorded states, preserve useful measured
-attempts, compare alternatives, and return to a known-good implementation
-without protecting the current working kernel from ambitious changes.
+Use checkout_experiment only to restore the active branch's base or one of its
+own experiments. Starting another structure is create_handoff's responsibility.
 """
 
 
@@ -254,7 +254,7 @@ def _parse_args(argv=None):
         "--skip-baseline-benchmark",
         action="store_true",
         help="Stage the baseline without benchmarking or logging it. Useful for "
-        "an incomplete scaffold; the first experiment logged by the agent is v0.",
+        "an incomplete scaffold; the first experiment logged by the agent is e0.",
     )
     return parser.parse_args(argv)
 
@@ -320,8 +320,7 @@ def main(argv=None) -> int:
                 f"Error: [task] baseline = {baseline!r} is not a file (expected a solution .json or 'reference')."
             )
 
-    # Resolve the optional comparison target; [task.target] carries its journal
-    # metadata and a `path` to the target solution .json.
+    # Resolve the optional target
     target_cfg = task_cfg.get("target")
     target_path = target_label = target_description = None
     if target_cfg:
@@ -347,9 +346,14 @@ def main(argv=None) -> int:
             "Install ncu or remove profile_kernel from [tools] enabled."
         )
 
-    # Wipe prior-run state, leaving task/ untouched.
-    for stale in (src_dir, workspace / "experiments", workspace / ".state",
-                  workspace / _tree.JOURNAL_PATH):
+    # Wipe prior-run state
+    for stale in (
+        src_dir,
+        workspace / "experiments",
+        workspace / ".state",
+        workspace / _tree.MEMORY_VIEW_PATH,
+        workspace / "optimization_journal.md",
+    ):
         if stale.is_dir():
             shutil.rmtree(stale)
         elif stale.is_file():
@@ -403,25 +407,24 @@ def main(argv=None) -> int:
             print(f"[Setup] staged initial kernel from {_disp(baseline_path, repo_root)}")
         _stage_files(src_dir, files)
 
-        # Seed the tree from the adapter (the kernel language now comes from the
-        # frozen baseline spec), so the journal reads the task from the tree.
+        # Seed optimization memory
         spec = adapter.task_spec()
-        tree = _tree.bootstrap_tree(
+        memory = _tree.bootstrap_memory(
             task=spec.name,
             kernel_description=spec.description,
             hardware=adapter.hardware(),
             language=adapter.language(),
         )
-        tree["task_spec"] = spec.model_dump()
-        tree["representative_workload_axes"] = adapter.representative_axes()
-        tree["build_contract"] = adapter.build_contract()
-        _tree.save_tree(tree)
+        memory["task_spec"] = spec.model_dump()
+        memory["representative_workload_axes"] = adapter.representative_axes()
+        memory["build_contract"] = adapter.build_contract()
+        _tree.save_memory(memory)
         print(
-            f"[Setup] created {_disp(workspace / '.state' / 'tree.json', repo_root)} "
-            f"and {_disp(workspace / _tree.JOURNAL_PATH, repo_root)}."
+            f"[Setup] created {_disp(workspace / _tree.MEMORY_PATH, repo_root)} "
+            f"and {_disp(workspace / _tree.MEMORY_VIEW_PATH, repo_root)}."
         )
 
-        # Measure the comparison target and record it on the tree.
+        # Measure comparison target
         if target_path is not None:
             print(f"[Setup] measuring target '{target_label}' from {_disp(target_path, repo_root)}...")
             try:
@@ -436,17 +439,16 @@ def main(argv=None) -> int:
                     f"[Setup] target '{target_label}' did not pass every workload "
                     f"(status={evaluation.status}); aborting."
                 )
-            tree["target"] = {
+            memory["target"] = {
                 "label": target_label,
                 "solution": solution_id,
                 "description": target_description,
                 "evaluation": evaluation.model_dump(),
             }
-            _tree.save_tree(tree)
+            _tree.save_memory(memory)
             print(f"[Setup] recorded target '{target_label}'.")
 
-        # An incomplete scaffold is useful source material but not useful evidence.
-        # Leave the tree empty in that mode; the agent's first logged result is v0.
+        # Preserve incomplete scaffold
         if args.skip_baseline_benchmark:
             print(
                 "[Setup] skipped the baseline benchmark; no initial experiment "

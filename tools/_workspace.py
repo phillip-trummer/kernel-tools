@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -30,7 +31,7 @@ EXPERIMENTS_DIR = Path("experiments")
 BENCHMARK_CACHE_PATH = Path(".state/benchmark_cache.json")
 # One run-level config/provenance file: the selected adapter + the frozen build
 # spec (and, later, environment/timing/oracle/normalizer/anchors). Internal —
-# never agent-facing; the agent-facing state is tree.json.
+# Keep internal run state separate from agent-facing memory.
 BENCHMARK_STATE_PATH = Path(".state/benchmark.json")
 
 
@@ -50,6 +51,31 @@ def resolve_experiment_dir(experiment_id: str) -> Path | str:
         )
         return f"experiment {experiment_id!r} not found. Available: {available}"
     return exp_dir
+
+
+def restore_experiment(experiment_id: str) -> int | str:
+    """Mirror a logged experiment into the working kernel."""
+    exp_dir = resolve_experiment_dir(experiment_id)
+    if not isinstance(exp_dir, Path):
+        return exp_dir
+    exp_files = [p for p in exp_dir.iterdir() if p.is_file()]
+    if not exp_files:
+        return f"experiment {experiment_id!r} has no source files; refusing to wipe working kernel."
+
+    # Prepare working directory
+    src_dir = SRC_DIR.resolve()
+    src_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove stale files
+    exp_names = {p.name for p in exp_files}
+    for stale in src_dir.iterdir():
+        if stale.is_file() and stale.name not in exp_names:
+            stale.unlink()
+
+    # Restore snapshot
+    for source in exp_files:
+        shutil.copyfile(source, src_dir / source.name)
+    return len(exp_files)
 
 
 # --- Working source (src/) ---
@@ -79,7 +105,7 @@ def src_files_hash(file_pairs: list[tuple[str, str]]) -> str:
 
 def solution_name_from_src_files(file_pairs: list[tuple[str, str]]) -> str:
     """The canonical `candidate_<hash16>` name identifying a src/ snapshot.
-    Used as both the flashinfer Solution.name and the dedup key on tree nodes."""
+    Used as both the flashinfer Solution.name and the experiment dedup key."""
     return f"candidate_{src_files_hash(file_pairs)[:16]}"
 
 
