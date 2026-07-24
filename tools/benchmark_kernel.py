@@ -81,62 +81,104 @@ def benchmark_kernel(scope: str = "smoke") -> str:
         cache.record(solution_name_from_src_files(read_src_files()), evaluation)
         cache.save(BENCHMARK_CACHE_PATH)
 
-    return json.dumps(_format_for_agent(evaluation, scope), indent=2)
+    return json.dumps(_format_for_agent(evaluation, scope), separators=(",", ":"))
 
 
 def _format_for_agent(evaluation, scope: str) -> dict:
-    """Return the JSON payload shown to the agent, built from the Evaluation
-    alone — the adapter already normalized every diagnostic.
+    """Project the lossless Evaluation into a compact, agent-facing payload.
 
-    Every outcome uses one shape: the Evaluation with null/empty fields stripped
-    per workload. The representative workloads carry the failure diagnostics
-    (they span the shape range, so they are the right failure examples); a
-    diagnostic shared across workloads — e.g. one compile error — is shown once,
-    on the first workload, and dropped from the rest (their outcome already says
-    they failed the same way).
+    Concrete representative axes and the run-wide tolerance are already durable
+    in the journal. Repeating them on every benchmark call costs context without
+    adding information, so this view carries performance for passes and only the
+    tolerance/correctness/diagnostic detail needed to explain failures. The
+    cached Evaluation remains unchanged.
     """
-    payload = evaluation.model_dump()
+    raw = evaluation.model_dump()
+    payload: dict = {
+        "status": raw["status"],
+        "scope": scope,
+        "workloads": {
+            "passed": raw["passed_workload_count"],
+            "total": raw["workload_count"],
+        },
+    }
 
-    reps: dict[str, dict] = {}
-    seen: set[str] = set()  # diagnostic texts already shown by an earlier workload
-    for label, result in payload["representative_workloads"].items():
-        # Correctness maxima are only meaningful against the gate that produced
-        # them: the max-abs and max-rel points are different elements, and a
-        # workload passes when no single point exceeds both tolerances. Printed
-        # beside the task's atol/rtol on a pass they read as a catastrophic
-        # failure. Show them only where they explain one.
-        if result.get("outcome") == "PASSED":
-            result.pop("correctness", None)
+    geomean = _prune_nulls(
+        {
+            "latency_ms": raw.get("geomean_latency_ms"),
+            "speedup_factor": raw.get("geomean_speedup_factor"),
+        }
+    )
+    if geomean:
+        payload["geomean"] = geomean
+
+    representatives: dict[str, dict] = {}
+    failed_labels: list[str] = []
+    tolerances: dict[str, dict] = {}
+    correctness: dict[str, dict] = {}
+    diagnostics: dict[str, list[str]] = {}
+
+    failure_groups = {
+        outcome: {"count": count}
+        for outcome, count in raw["failure_statuses"].items()
+    }
+
+    for label, result in raw["representative_workloads"].items():
+        if result["outcome"] == "PASSED":
+            representatives[label] = _prune_nulls(
+                {
+                    "latency_ms": result.get("latency_ms"),
+                    "reference_latency_ms": result.get("reference_latency_ms"),
+                    "speedup_factor": result.get("speedup_factor"),
+                }
+            )
+            continue
+
+        failed_labels.append(label)
+        group = failure_groups.setdefault(result["outcome"], {"count": 0})
+        group.setdefault("representatives", []).append(label)
+
+        tolerance = result.get("tolerance")
+        if tolerance:
+            rendered = _prune_nulls(tolerance)
+            if rendered:
+                tolerances[label] = rendered
+
+        measured = result.get("correctness")
+        if measured:
+            rendered = _prune_correctness(measured)
+            if rendered:
+                correctness[label] = rendered
+
         diagnostic = result.get("diagnostic")
-        if diagnostic is not None and diagnostic in seen:
-            result.pop("diagnostic")  # already shown by an earlier workload
-        elif diagnostic is not None:
-            seen.add(diagnostic)
-        reps[label] = _prune_nulls(result)
-    payload["representative_workloads"] = reps
+        if diagnostic:
+            diagnostics.setdefault(diagnostic, []).append(label)
 
-    # Drop metric fields that carry nothing for this run (latency-only runs have
-    # no speedup; all-passed runs have no failure histogram).
-    for key in ("geomean_speedup_factor", "geomean_latency_ms"):
-        if payload.get(key) is None:
-            payload.pop(key, None)
-    if not payload["failure_statuses"]:
-        payload.pop("failure_statuses")
+    if representatives:
+        payload["representatives"] = representatives
+    if failure_groups:
+        payload["failures"] = failure_groups
 
-    if scope == "smoke":
-        payload = _mark_smoke(payload)
-    return payload
+    # A common failure tolerance is a run-level fact. Keep the per-representative
+    # form only for adapters whose correctness bars genuinely vary by workload.
+    if tolerances:
+        unique = {json.dumps(value, sort_keys=True) for value in tolerances.values()}
+        if len(tolerances) == len(failed_labels) and len(unique) == 1:
+            payload["tolerance"] = next(iter(tolerances.values()))
+        else:
+            payload["tolerance_by_representative"] = tolerances
+    if correctness:
+        payload["correctness"] = correctness
 
-
-def _mark_smoke(payload: dict) -> dict:
-    payload["scope"] = "smoke"
-    for src, dst in (
-        ("geomean_speedup_factor", "representative_geomean_speedup_factor"),
-        ("geomean_latency_ms", "representative_geomean_latency_ms"),
-    ):
-        value = payload.pop(src, None)
-        if value is not None:
-            payload[dst] = value
+    # Preserve every distinct diagnostic, but never repeat identical compiler or
+    # runtime output for each workload affected by the same failure.
+    if len(diagnostics) == 1:
+        payload["diagnostic"] = next(iter(diagnostics))
+    elif diagnostics:
+        payload["diagnostics"] = [
+            {"representatives": labels, "message": message}
+            for message, labels in diagnostics.items()
+        ]
     return payload
 
 

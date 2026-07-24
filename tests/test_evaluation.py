@@ -3,11 +3,18 @@ from dataclasses import dataclass
 
 from pydantic import ValidationError
 
-from tools._evaluation import Tolerance, WorkloadResult, aggregate, normalize_outcome
+from tools._evaluation import (
+    Correctness,
+    Tolerance,
+    WorkloadResult,
+    aggregate,
+    normalize_outcome,
+)
 from tools._workloads import (
     representative_item_for_label,
     select_representative_workloads,
 )
+from tools.benchmark_kernel import _format_for_agent
 
 
 @dataclass
@@ -139,6 +146,100 @@ class EvaluationContractTests(unittest.TestCase):
         self.assertEqual(evaluation.status, "FAILED")
         self.assertEqual(evaluation.workload_count, 0)
         self.assertIsNone(evaluation.geomean_latency_ms)
+
+    def test_agent_view_compacts_passes_but_keeps_reference_latency(self):
+        tolerance = Tolerance(max_atol=0.01, max_rtol=0.02)
+        evaluation = aggregate(
+            [
+                WorkloadResult(
+                    axes={"n": 1},
+                    outcome="PASSED",
+                    latency_ms=1.0,
+                    reference_latency_ms=4.0,
+                    speedup_factor=4.0,
+                    tolerance=tolerance,
+                    representative_name="small",
+                ),
+                WorkloadResult(
+                    axes={"n": 2},
+                    outcome="PASSED",
+                    latency_ms=2.0,
+                    reference_latency_ms=8.0,
+                    speedup_factor=4.0,
+                    tolerance=tolerance,
+                    representative_name="xlarge",
+                ),
+            ]
+        )
+
+        payload = _format_for_agent(evaluation, "smoke")
+
+        self.assertEqual(
+            payload,
+            {
+                "status": "ALL_PASSED",
+                "scope": "smoke",
+                "workloads": {"passed": 2, "total": 2},
+                "geomean": {"latency_ms": 1.414214, "speedup_factor": 4.0},
+                "representatives": {
+                    "small": {
+                        "latency_ms": 1.0,
+                        "reference_latency_ms": 4.0,
+                        "speedup_factor": 4.0,
+                    },
+                    "xlarge": {
+                        "latency_ms": 2.0,
+                        "reference_latency_ms": 8.0,
+                        "speedup_factor": 4.0,
+                    },
+                },
+            },
+        )
+
+    def test_agent_view_groups_failures_and_shared_detail(self):
+        tolerance = Tolerance(max_atol=0.01, max_rtol=0.02)
+        diagnostic = "ptxas: kernel uses too much shared data"
+        evaluation = aggregate(
+            [
+                WorkloadResult(
+                    axes={"n": i},
+                    outcome="COMPILE_ERROR",
+                    tolerance=tolerance,
+                    correctness=Correctness(has_inf=True),
+                    diagnostic=diagnostic,
+                    representative_name=label,
+                )
+                for i, label in enumerate(
+                    ("small", "medium", "large", "xlarge"), start=1
+                )
+            ]
+        )
+
+        payload = _format_for_agent(evaluation, "smoke")
+
+        self.assertEqual(
+            payload["failures"],
+            {
+                "COMPILE_ERROR": {
+                    "count": 4,
+                    "representatives": ["small", "medium", "large", "xlarge"],
+                }
+            },
+        )
+        self.assertEqual(
+            payload["tolerance"],
+            {"max_atol": 0.01, "max_rtol": 0.02},
+        )
+        self.assertEqual(payload["diagnostic"], diagnostic)
+        self.assertNotIn("representatives", payload)
+        self.assertNotIn("tolerance_by_representative", payload)
+        self.assertEqual(
+            payload["correctness"],
+            {
+                label: {"has_inf": True}
+                for label in ("small", "medium", "large", "xlarge")
+            },
+        )
 
 
 if __name__ == "__main__":
